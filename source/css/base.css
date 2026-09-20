@@ -1,0 +1,177 @@
+/* WorkShop MVP — 基础样式（浅色主题，桌面优先）
+   步骤1：仅布局骨架 + 周时间线；移动端完整适配列为后续。 */
+
+:root {
+  --bg: #f7f8fa;
+  --panel: #ffffff;
+  --line: #e3e6ea;
+  --ink: #1f2329;
+  --ink-soft: #6b7280;
+  --accent: #2f6fed;       /* 湖蓝，政务/工作场景 */
+  --accent-soft: #e8f0fe;
+  /* 类型颜色（颜色 = 日程类型，主区分维度） */
+  --c-meeting: #2f6fed;    /* 会议 蓝 */
+  --c-trip: #f0a020;       /* 行程 橙 */
+  --c-class: #1f9d6b;      /* 课表 绿 */
+  --c-sport: #0ea5b7;      /* 运动 青 */
+  --c-life: #8b5cf6;       /* 生活 紫 */
+  --c-pending: #9aa3af;    /* 待安排/其他 灰 */
+  --warn: #c0392b; --warn-daily: #e08e0b;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+}
+
+body { display: flex; flex-direction: column; height: 100vh; }
+
+/* 上栏 */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 16px; background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.brand { font-size: 18px; font-weight: 700; }
+.brand-sub { font-size: 12px; font-weight: 400; color: var(--ink-soft); margin-left: 6px; }
+.actions button {
+  margin-left: 8px; padding: 6px 12px; font-size: 13px;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: #fff; color: var(--ink); cursor: pointer;
+}
+.actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.actions button:disabled { opacity: .45; cursor: not-allowed; }
+
+/* 主体分栏 */
+.layout { flex: 1; display: flex; min-height: 0; }
+.timeline {
+  flex: 1; display: grid; grid-template-columns: repeat(7, 1fr);
+  gap: 1px; background: var(--line); overflow: auto; padding: 0;
+}
+.detail {
+  width: 320px; border-left: 1px solid var(--line);
+  background: var(--panel); padding: 16px; overflow: auto;
+}
+.detail-empty { color: var(--ink-soft); font-size: 14px; }
+
+/* 单列（一天） */
+.day-col { background: var(--panel); display: flex; flex-direction: column; min-width: 120px; }
+.day-head {
+  padding: 8px 10px; border-bottom: 1px solid var(--line);
+  background: var(--accent-soft); position: sticky; top: 0;
+}
+.day-name { font-weight: 600; font-size: 14px; }
+.day-date { font-size: 12px; color: var(--ink-soft); }
+.day-body { flex: 1; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+
+/* 事项色块 */
+.item {
+  border-radius: 6px; padding: 6px 8px; color: #fff;
+  font-size: 13px; cursor: pointer; line-height: 1.35;
+  position: relative;
+}
+.item.type-meeting { background: var(--c-meeting); }
+.item.type-trip { background: var(--c-trip); }
+.item.type-pending, .item.type-other { background: var(--c-pending); }
+.item.type-class { background: var(--c-class); }
+.item.type-sport { background: var(--c-sport); }
+.item.type-life { background: var(--c-life); }
+.item .item-time { font-size: 11px; opacity: .9; display: block; }
+
+/* 重叠提醒：工作=冲突(红)，日常=提醒(橙虚线) */
+.item.overlap-work { outline: 2px solid #c0392b; box-shadow: 0 0 0 2px rgba(192,57,43,.25); }
+.item.overlap-daily { outline: 2px dashed #e08e0b; }
+.item.overlap-cross { outline: 2px solid #7c3aed; box-shadow: 0 0 0 2px rgba(124,58,237,.25); }
+.item .item-warn { position: absolute; top: 4px; right: 6px; font-size: 13px; }
+
+/* 下栏状态 */
+.statusbar {
+  display: flex; gap: 24px; padding: 8px 16px;
+  background: var(--panel); border-top: 1px solid var(--line);
+  font-size: 12px; color: var(--ink-soft);
+}
+
+/* 上栏中间：当前周范围 */
+.week-range { font-size: 13px; color: var(--ink-soft); font-weight: 500; }
+
+/* 时间线交互 */
+.day-col:hover { background: #fafbfc; }
+.item:hover { filter: brightness(1.05); box-shadow: 0 1px 4px rgba(0,0,0,.15); }
+
+/* 右侧详情卡片 */
+.detail-card { border: 1px solid var(--line); border-radius: 8px; padding: 14px; background: #fff; }
+.detail-card h3 { margin: 0 0 10px; font-size: 16px; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; color: #fff; margin-right: 4px; }
+.badge.table-work, .badge.table-daily { background: #6b7280; }  /* 表归属：中性灰，不与类型色混淆 */
+.badge.type-meeting { background: var(--c-meeting); }
+.badge.type-trip { background: var(--c-trip); }
+.badge.type-pending, .badge.type-other { background: var(--c-pending); }
+.badge.type-class { background: var(--c-class); }
+.badge.type-sport { background: var(--c-sport); }
+.badge.type-life { background: var(--c-life); }
+.legend-item .chip { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+.detail-card .row { margin: 6px 0; font-size: 13px; line-height: 1.5; }
+.detail-card .row b { color: var(--ink-soft); font-weight: 600; margin-right: 6px; }
+.btn-delete { margin-top: 12px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: #c0392b; cursor: pointer; font-size: 13px; }
+.btn-delete:disabled { opacity: .45; cursor: not-allowed; }
+
+/* 事项色块上的部门/类别记号 */
+.item-mark {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; margin-right: 6px;
+  border-radius: 50%; background: rgba(255,255,255,.22);
+  font-size: 11px; line-height: 1; font-weight: 700;
+}
+.item-title { font-weight: 500; }
+
+/* 详情里的记号标签 */
+.owner-mark {
+  display: inline-block; margin-left: 8px; padding: 2px 8px; border-radius: 12px;
+  background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 600;
+}
+
+/* 底部表签（仿 Excel 工作表切换） */
+.sheet-tabs {
+  display: flex; gap: 4px; padding: 4px 12px 6px;
+  background: var(--bg); border-top: 1px solid var(--line);
+}
+.sheet-tabs button {
+  padding: 5px 14px; font-size: 13px; cursor: pointer;
+  border: 1px solid var(--line); border-bottom: none; border-radius: 6px 6px 0 0;
+  background: #fff; color: var(--ink-soft);
+}
+.sheet-tabs button.active {
+  background: var(--panel); color: var(--accent); font-weight: 600;
+  border-color: var(--accent); position: relative; top: 1px;
+}
+
+/* 新建 / 编辑 表单 */
+#item-form { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
+#item-form label { display: flex; flex-direction: column; font-size: 12px; color: var(--ink-soft); gap: 4px; }
+#item-form input, #item-form select, #item-form textarea {
+  padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;
+  font-size: 13px; color: var(--ink); background: #fff; font-family: inherit;
+}
+#item-form textarea { resize: vertical; }
+#item-form .row2 { display: flex; gap: 10px; }
+#item-form .row2 label { flex: 1; }
+.form-actions { display: flex; gap: 8px; margin-top: 4px; }
+.form-actions button {
+  padding: 7px 14px; border-radius: 6px; font-size: 13px; cursor: pointer; border: 1px solid var(--line); background: #fff; color: var(--ink);
+}
+.form-actions .btn-save.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.form-actions .btn-edit { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+
+/* 图例：部门 / 成员记号 */
+.legend { margin-top: 16px; padding-top: 12px; border-top: 1px dashed var(--line); }
+.legend-title { font-size: 12px; color: var(--ink-soft); margin-bottom: 6px; }
+.legend-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.legend-item {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 12px;
+  background: var(--bg); font-size: 12px; color: var(--ink);
+}

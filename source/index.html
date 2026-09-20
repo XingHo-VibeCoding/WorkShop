@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WorkShop 会议工作台</title>
+  <link rel="stylesheet" href="css/base.css">
+</head>
+<body>
+  <!-- 上栏：应用标题 + 全局操作 -->
+  <header class="topbar">
+    <div class="brand">WorkShop <span class="brand-sub">会议工作台</span></div>
+    <div class="week-range" id="week-range">—</div>
+    <div class="actions">
+      <button id="btn-prev-week" title="上一周">‹ 上周</button>
+      <button id="btn-next-week" title="下一周">下周 ›</button>
+      <button id="btn-new" class="primary" title="新建事项">+ 新建</button>
+      <button id="btn-import" disabled title="后续启用">导入</button>
+    </div>
+  </header>
+
+  <!-- 主体：左时间线 / 右详情 -->
+  <main class="layout">
+    <section class="timeline" id="timeline" aria-label="周时间线">
+      <!-- 7 天分列由 JS 渲染 -->
+    </section>
+    <aside class="detail" id="detail">
+      <p class="detail-empty">点击时间线上的事项查看详情。</p>
+    </aside>
+  </main>
+
+  <!-- 下栏：状态栏 -->
+  <footer class="statusbar">
+    <span id="stat-week">当前周：—</span>
+    <span id="stat-count">事项：0</span>
+    <span id="stat-overlap">重叠：无</span>
+    <span id="stat-sync">同步状态：本地内存（未接入腾讯文档）</span>
+  </footer>
+
+  <!-- 页面底部：表签切换（仿 Excel） -->
+  <nav class="sheet-tabs" id="sheet-tabs">
+    <button data-mode="work" class="active">工作事项表</button>
+    <button data-mode="daily">日常事项表</button>
+    <button data-mode="all">总表</button>
+  </nav>
+
+  <script src="js/timeline.js"></script>
+</body>
+</html>
