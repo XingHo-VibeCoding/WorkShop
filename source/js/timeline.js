@@ -1,12 +1,12 @@
-/* WorkShop MVP — 周时间线 + 双表(工作/日常) + 三模式 + 重叠提醒（步骤3扩展）
+/* WorkShop MVP — 周时间线 + 双表(工作/日常) + 三模式 + 重叠提醒 + 四状态机
    默认渲染（不引入 PreText）。已预留 renderItemText() 接缝，后续可无缝替换 PreText。
-   记号渲染走统一 markOf()，后续可替换为部门徽章/印章图片（用户 2026-09-20 反馈）。 */
+   记号渲染走统一 markOf()，支持「头像图片优先、符号兜底」，满足「标记可自定义」。 */
 
 const WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
 
 /* 记号 = 部门 / 人物（是否私人）。颜色 = 日程类型。
    用户 2026-09-20：记号只做部门与人物区分（私人），不表示类型；类型用颜色区分。
-   后续多用户：每人各自记号，默认取名字首字（MVP 单人，私人项归「我(私人)」）。 */
+   后续多用户：每人各自记号；avatarUrl 可来自导入图片或腾讯文档/会议默认头像。 */
 const OWNERS = [
   { key: 'self',   name: '我(部门)', mark: '★' },
   { key: 'depta',  name: '综合部',   mark: '△' },
@@ -24,10 +24,10 @@ const MODES = [
   { key: 'all',   label: '总表' },
 ];
 
-// 统一记号出口：记号 = 部门/人物（私人）。后续可改为返回 <img> 徽章/印章
+// 统一记号出口：头像图片优先（avatarUrl），缺省用符号兜底。后续可改为 <img> 徽章/印章
 function markOf(it) {
   const o = ownerOf(it.ownerKey);
-  return { symbol: o.mark, name: o.name };
+  return { symbol: o.mark, name: o.name, avatar: it.avatarUrl || o.avatarUrl || null };
 }
 
 function typeLabelOf(it) {
@@ -54,7 +54,47 @@ function esc(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// ---- 内存态数据（步骤3 起支持增删改；步骤4 再落腾讯文档）----
+// ---- 四状态机 ----
+const appState = { value: 'loading', error: null };
+
+function setMainVisible(v) {
+  document.getElementById('timeline').hidden = !v;
+  document.getElementById('detail').hidden = !v;
+}
+function showStateLayer(which) {
+  const layer = document.getElementById('state-layer');
+  layer.hidden = !which;
+  layer.querySelectorAll('.state-panel').forEach(p => { p.hidden = (p.dataset.state !== which); });
+}
+function setState(s, msg) {
+  appState.value = s;
+  if (s === 'loading' || s === 'error') {
+    setMainVisible(false);
+    showStateLayer(s);
+    if (s === 'error') document.getElementById('error-msg').textContent = msg || '日程数据加载出错，请重试。';
+  } else { // success | empty
+    setMainVisible(true);
+    showStateLayer(null);
+  }
+  document.getElementById('stat-sync').textContent = '同步状态：本地内存（未接入腾讯文档）';
+  document.getElementById('stat-sync').dataset.state = s;
+}
+
+// ---- 数据层：异步加载（mock 返回 Promise，预留真实 API 接缝）----
+/* 真实接口实装后，loadItems 改为 fetch('/api/schedule?week=...') 等；
+   当前用本地 mock + setTimeout 模拟网络延迟，并支持 URL 调试参数 ?debug=empty|error 触发各状态。 */
+function loadItems(weekOffset = 0) {
+  const debug = new URLSearchParams(location.search).get('debug');
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      if (debug === 'empty') return resolve([]);                       // 演示「空」状态
+      if (debug === 'error') return reject(new Error('模拟：腾讯文档读取失败（401 未授权）')); // 演示「错误」状态
+      resolve(seedItems(mondayOf(weekOffset)));                        // 正常：返回 mock 数据
+    }, 600);
+  });
+}
+
+// ---- 内存态数据（seed；步骤4 再落腾讯文档）----
 function seedItems(monday) {
   return [
     // 工作事项表
@@ -70,7 +110,7 @@ function seedItems(monday) {
   ];
 }
 
-let items = seedItems(mondayOf(0));
+let items = [];
 let currentOffset = 0;
 let currentMode = 'work';
 
@@ -109,6 +149,13 @@ function findCrossOverlaps(workList, dailyList) {
   return overlap;
 }
 
+function markHTML(m, withName) {
+  const inner = m.avatar
+    ? `<img class="item-avatar" src="${esc(m.avatar)}" alt="${esc(m.name)}">`
+    : `<span class="item-mark" title="${esc(m.name)}">${m.symbol}</span>`;
+  return inner + (withName ? `<span class="owner-name">${esc(m.name)}</span>` : '');
+}
+
 function legendHTML() {
   const TYPE_C = {
     meeting: 'var(--c-meeting)', trip: 'var(--c-trip)', pending: 'var(--c-pending)',
@@ -117,7 +164,10 @@ function legendHTML() {
   const TYPE_L = { meeting: '会议', trip: '行程', pending: '待安排', class: '课表', sport: '运动', life: '生活', other: '其他' };
   const typeLegend = Object.keys(TYPE_L)
     .map(k => `<span class="legend-item"><span class="chip" style="background:${TYPE_C[k]}"></span>${TYPE_L[k]}</span>`).join('');
-  const markList = OWNERS.map(o => `<span class="legend-item">${o.mark} ${esc(o.name)}</span>`).join('');
+  const markList = OWNERS.map(o => {
+    const m = markOf({ ownerKey: o.key });
+    return `<span class="legend-item">${markHTML(m)} ${esc(o.name)}</span>`;
+  }).join('');
   const markSection = currentMode === 'all'
     ? `<div class="legend-title">记号（仅总表显示，区分部门/人物）</div><div class="legend-row">${markList}</div>`
     : '';
@@ -131,11 +181,9 @@ function render() {
   const monday = mondayOf(currentOffset);
   const sunday = addDays(monday, 6);
 
-  // 当前模式下的候选事项（本周内）
   const candidates = items.filter(it => it.start >= monday && it.start <= sunday);
   const view = currentMode === 'all' ? candidates : candidates.filter(it => it.table === currentMode);
 
-  // 重叠检测：工作表内（冲突）/ 日常表内（提醒）/ 跨表 工作↔日常（冲突，也要警告）
   const workItems = candidates.filter(it => it.table === 'work');
   const dailyItems = candidates.filter(it => it.table === 'daily');
   const workOverlap = findOverlaps(workItems);
@@ -156,12 +204,10 @@ function render() {
 
     const body = document.createElement('div');
     body.className = 'day-body';
-    // 同一天内按开始时间升序排列（开始时间相同则比结束时间），保证卡片按时间顺序
     view.filter(it => it.start.getTime() === dayDate.getTime())
       .sort((a, b) => a.startTime.localeCompare(b.startTime) || a.endTime.localeCompare(b.endTime))
       .forEach(it => {
       const m = markOf(it);
-      // 重叠判定优先级：跨表冲突 > 工作表内冲突 > 日常表内提醒
       const ovCross = crossOverlap.has(it.id);
       const ovWork = workOverlap.has(it.id);
       const ovDaily = dailyOverlap.has(it.id);
@@ -172,8 +218,10 @@ function render() {
       const hasOv = ovClass !== '';
       const el = document.createElement('div');
       el.className = `item type-${it.type}${hasOv ? ' ' + ovClass : ''}`;
+      el.dataset.id = it.id;
+      // [预留] 拖动式删除/转移接口：后续接入 draggable + dragstart/dragover/drop 实现跨日/跨表转移
       el.innerHTML =
-        (currentMode === 'all' ? `<span class="item-mark" title="${esc(m.name)}">${m.symbol}</span>` : '') +
+        (currentMode === 'all' ? markHTML(m) : '') +
         `<span class="item-time">${it.startTime}–${it.endTime}</span>` +
         `<span class="item-title">${esc(renderItemText(it))}</span>` +
         (hasOv ? `<span class="item-warn" title="${ovTitle}">⚠</span>` : '');
@@ -184,10 +232,8 @@ function render() {
     timeline.appendChild(col);
   }
 
-  // 上栏中间：当前周范围
   const weekLabel = currentOffset === 0 ? '本周' : (currentOffset > 0 ? '下' + currentOffset + '周' : '上' + (-currentOffset) + '周');
   document.getElementById('week-range').textContent = `${fmtMD(monday)} ~ ${fmtMD(sunday)} · ${weekLabel}`;
-  // 下栏状态
   const modeLabel = (MODES.find(x => x.key === currentMode) || {}).label || '';
   document.getElementById('stat-week').textContent = `当前周：${weekLabel}`;
   document.getElementById('stat-count').textContent = `事项（${modeLabel}）：${view.length}`;
@@ -198,8 +244,7 @@ function render() {
   if (wn) ovParts.push(`工作⚠${wn}`);
   if (dn) ovParts.push(`日常⚠${dn}`);
   if (cn) ovParts.push(`跨表⚠${cn}`);
-  const ovMsg = ovParts.length ? `重叠：${ovParts.join(' / ')}` : '重叠：无';
-  document.getElementById('stat-overlap').textContent = ovMsg;
+  document.getElementById('stat-overlap').textContent = ovParts.length ? `重叠：${ovParts.join(' / ')}` : '重叠：无';
 }
 
 function showDetail(item) {
@@ -210,13 +255,16 @@ function showDetail(item) {
   }
   const m = markOf(item);
   const tableLabel = item.table === 'daily' ? '日常事项表' : '工作事项表';
+  const ownerHTML = currentMode === 'all'
+    ? `<span class="owner-mark">${markHTML(m)} ${esc(m.name)}</span>`
+    : `<span class="owner-mark">${markHTML(m)} ${esc(m.name)}</span>`;
   d.innerHTML = `
     <div class="detail-card">
       <h3>${esc(item.title)}</h3>
       <p class="row">
         <span class="badge table-${item.table}">${tableLabel}</span>
         <span class="badge type-${item.type}">${typeLabelOf(item)}</span>
-        ${currentMode === 'all' ? `<span class="owner-mark" title="${esc(m.name)}">${m.symbol} ${esc(m.name)}</span>` : `<span class="owner-mark">${esc(m.name)}</span>`}
+        ${ownerHTML}
       </p>
       <p class="row"><b>时间</b>${fmtMD(item.start)} ${item.startTime}–${item.endTime}</p>
       <p class="row"><b>参与人</b>${esc(item.attendees)}</p>
@@ -242,7 +290,6 @@ function renderForm(existing) {
     const sel = existing && existing.start && existing.start.getTime() === dd.getTime() ? 'selected' : '';
     return `<option value="${i}" ${sel}>${nm} ${fmtMD(dd)}</option>`;
   }).join('');
-  // 创建/编辑时只能选 工作事项表 / 日常事项表；总表是二者之和，不可选
   const formModes = MODES.filter(m => m.key !== 'all');
   const modeOpts = formModes.map(m => `<option value="${m.key}" ${m.key === tbl ? 'selected' : ''}>${m.label}</option>`).join('');
   const ownerOpts = OWNERS.filter(o => o.key !== 'me').map(o => `<option value="${o.key}" ${existing && existing.ownerKey === o.key ? 'selected' : ''}>${o.mark} ${esc(o.name)}</option>`).join('');
@@ -313,8 +360,7 @@ function saveItem(existing) {
   };
   if (existing) Object.assign(existing, data);
   else items.push(Object.assign({ id: 'u' + Date.now() }, data));
-  render();
-  showDetail(existing || items[items.length - 1]);
+  afterMutation();
 }
 
 function deleteItem(id) {
@@ -322,15 +368,41 @@ function deleteItem(id) {
   if (!it) return;
   if (!confirm(`确定删除「${it.title}」？\n此操作仅从本地内存移除（尚未接入腾讯文档，不会同步删除云端）。`)) return;
   items = items.filter(x => x.id !== id);
-  render();
-  showDetail(null);
+  afterMutation(true);
 }
 
+// 变更后刷新：重渲染并根据本周是否还有事项切换 success / empty
+function afterMutation(backToEmpty) {
+  render();
+  const monday = mondayOf(currentOffset), sunday = addDays(monday, 6);
+  const hasWeek = items.some(it => it.start >= monday && it.start <= sunday);
+  setState(hasWeek ? 'success' : 'empty');
+  if (!hasWeek) showDetail(null);
+  else if (backToEmpty) showDetail(null);
+}
+
+// ---- 预留接口（今日不实装）----
+/* [预留] 导入识别：第 3 周接入 OCR / 外部 AI 接口（如百度智能云 OCR），
+   把图片/表格转结构化事项后再 loadItems 合并。当前仅禁用按钮占位。 */
+function importSchedule() { /* TODO(周3): 调 OCR API → 解析 → 合并 items → afterMutation() */ }
+
+/* [预留] 拖动式删除/转移：给 .item 加 draggable + dragstart/dragover/drop，
+   实现跨日/跨表拖拽改期与转移；今日仅预留，不实现交互。 */
+function setupDragTransfer() { /* TODO: 拖拽改期 / 转移到其他表或删除区 */ }
+
+/* [预留] 反馈栏（设想①）：接口实装后挂载 #feedback-bar，反馈数据写腾讯文档；
+   空闲时间总览（设想②）：computeFreeTime 返回每表半小时粒度空闲网格，供 #free-time-overview 渲染。 */
+function computeFreeTime(view) { /* TODO(设想②): 以半小时为单位统计每日空闲，后续支持导出 + AI 精细化 */ }
+
 // 周切换
-document.getElementById('btn-prev-week').addEventListener('click', () => { currentOffset--; render(); });
-document.getElementById('btn-next-week').addEventListener('click', () => { currentOffset++; render(); });
+document.getElementById('btn-prev-week').addEventListener('click', () => { currentOffset--; bootstrap(); });
+document.getElementById('btn-next-week').addEventListener('click', () => { currentOffset++; bootstrap(); });
 // 新建
 document.getElementById('btn-new').addEventListener('click', () => renderForm(null));
+// 空状态「新建」
+document.getElementById('btn-empty-new').addEventListener('click', () => { setState('success'); renderForm(null); });
+// 错误状态「重试」
+document.getElementById('btn-retry').addEventListener('click', () => bootstrap());
 // 底部表签切换
 document.getElementById('sheet-tabs').addEventListener('click', e => {
   const btn = e.target.closest('button[data-mode]');
@@ -340,4 +412,17 @@ document.getElementById('sheet-tabs').addEventListener('click', e => {
   render();
 });
 
-render();
+// ---- 启动：进入加载态 → 异步取数 → 成功/空/错误 ----
+async function bootstrap() {
+  setState('loading');
+  try {
+    const data = await loadItems(currentOffset);
+    items = data;
+    setState(data.length ? 'success' : 'empty');
+    render();
+    if (!data.length) showDetail(null);
+  } catch (e) {
+    setState('error', e.message || '日程数据加载出错，请重试。');
+  }
+}
+bootstrap();

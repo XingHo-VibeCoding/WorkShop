@@ -15,12 +15,40 @@
       <button id="btn-prev-week" title="上一周">‹ 上周</button>
       <button id="btn-next-week" title="下一周">下周 ›</button>
       <button id="btn-new" class="primary" title="新建事项">+ 新建</button>
-      <button id="btn-import" disabled title="后续启用">导入</button>
+      <button id="btn-import" disabled title="导入识别：第 3 周接入 OCR API（外部 AI 接口），本版仅预留 importSchedule() 接口">导入</button>
     </div>
   </header>
 
-  <!-- 主体：左时间线 / 右详情 -->
+  <!-- 主体：左时间线(主栏) / 右详情(侧栏) -->
   <main class="layout">
+    <!-- 状态层：加载中 / 空 / 错误（覆盖主体，由 appState 控制显隐） -->
+    <div class="state-layer" id="state-layer" hidden>
+      <!-- 加载中 -->
+      <div class="state-panel" data-state="loading">
+        <div class="skeleton-grid">
+          <div class="skeleton-col"></div><div class="skeleton-col"></div>
+          <div class="skeleton-col"></div><div class="skeleton-col"></div>
+          <div class="skeleton-col"></div><div class="skeleton-col"></div>
+          <div class="skeleton-col"></div>
+        </div>
+        <p class="state-text">正在加载本周日程…</p>
+      </div>
+      <!-- 空 -->
+      <div class="state-panel" data-state="empty" hidden>
+        <div class="state-icon">🗓️</div>
+        <p class="state-title">本周还没有安排</p>
+        <p class="state-text">点击「+ 新建」添加第一个事项；导入识别接入后可一键导入图片 / 表格。</p>
+        <button class="btn-primary" id="btn-empty-new">+ 新建事项</button>
+      </div>
+      <!-- 错误 -->
+      <div class="state-panel" data-state="error" hidden>
+        <div class="state-icon">⚠️</div>
+        <p class="state-title">加载失败</p>
+        <p class="state-text" id="error-msg">日程数据加载出错，请重试。</p>
+        <button class="btn-primary" id="btn-retry">重新加载</button>
+      </div>
+    </div>
+
     <section class="timeline" id="timeline" aria-label="周时间线">
       <!-- 7 天分列由 JS 渲染 -->
     </section>
@@ -43,6 +71,14 @@
     <button data-mode="daily">日常事项表</button>
     <button data-mode="all">总表</button>
   </nav>
+
+  <!--
+    【Day 8 预留挂载点（不实装，详见 PRD.md §6 后续设想）】
+    - 反馈栏（设想①）：接口实装后挂载，反馈数据写入腾讯文档（依赖第 3 周 API / 阶段二后端代理）。
+      <div id="feedback-bar" class="feedback-bar"></div>
+    - 空闲时间总览（设想②）：每个表一个、独立、半小时粒度；导出与 AI 精细化网格为后续。
+      <section id="free-time-overview" class="free-time"></section>
+  -->
 
   <script src="js/timeline.js"></script>
 </body>
