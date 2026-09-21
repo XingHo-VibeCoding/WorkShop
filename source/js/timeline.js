@@ -114,8 +114,30 @@ let items = [];
 let currentOffset = 0;
 let currentMode = 'work';
 
-// ---- 渲染接缝：默认纯文本；后续可在此调用 PreText 做字形排版 ----
+// ---- 渲染接缝：默认纯文本；后续接 PreText 时在此切换排版后端 ----
+/* 后续方向（用户 2026-09-21 定，选 B 推迟）：做 PreText 与纯 CSS 两套渲染后端对照——
+   同一 renderItemCard 组件通过 renderItemText() 接缝切换引擎（PreText 走真实字形测量、CSS 走默认，
+   CDN 不可达自动降级），用于验证排版效果差异。当前仅纯 CSS 实现。 */
 function renderItemText(item) { return item.title; }
+
+/* ============ 可复用卡片组件（余力加练 Day 8）============
+   renderItemCard：单一事项卡片，时间线 / 详情共用同一渲染源，消除重复拼接。
+   后续 PreText 对照组件将复用此组件 + renderItemText 接缝。 */
+function renderItemCard(item, opts = {}) {
+  const { showMark = false, warn = null } = opts;
+  const m = markOf(item);
+  const el = document.createElement('div');
+  el.className = `item type-${item.type}`;
+  el.dataset.id = item.id;
+  // [预留] 拖动式删除/转移：后续给 el 加 draggable + drop 事件即可，调用方无需改动
+  el.innerHTML =
+    (showMark ? markHTML(m) : '') +
+    `<span class="item-time">${item.startTime}–${item.endTime}</span>` +
+    `<span class="item-title">${esc(renderItemText(item))}</span>` +
+    (warn ? `<span class="item-warn" title="${esc(warn.title)}">⚠</span>` : '');
+  el.addEventListener('click', () => showDetail(item));
+  return el;
+}
 
 /* 重叠检测：按天分组，时间点相交即重叠（"HH:mm" 同格式可字典序比较） */
 function findOverlaps(list) {
@@ -207,27 +229,22 @@ function render() {
     view.filter(it => it.start.getTime() === dayDate.getTime())
       .sort((a, b) => a.startTime.localeCompare(b.startTime) || a.endTime.localeCompare(b.endTime))
       .forEach(it => {
-      const m = markOf(it);
-      const ovCross = crossOverlap.has(it.id);
-      const ovWork = workOverlap.has(it.id);
-      const ovDaily = dailyOverlap.has(it.id);
-      let ovClass = '', ovTitle = '';
-      if (ovCross) { ovClass = 'overlap-cross'; ovTitle = '跨表冲突：工作与日常时间重叠'; }
-      else if (ovWork) { ovClass = 'overlap-work'; ovTitle = '工作冲突：时间重叠'; }
-      else if (ovDaily) { ovClass = 'overlap-daily'; ovTitle = '日常提醒：时间重叠（允许重叠）'; }
-      const hasOv = ovClass !== '';
-      const el = document.createElement('div');
-      el.className = `item type-${it.type}${hasOv ? ' ' + ovClass : ''}`;
-      el.dataset.id = it.id;
-      // [预留] 拖动式删除/转移接口：后续接入 draggable + dragstart/dragover/drop 实现跨日/跨表转移
-      el.innerHTML =
-        (currentMode === 'all' ? markHTML(m) : '') +
-        `<span class="item-time">${it.startTime}–${it.endTime}</span>` +
-        `<span class="item-title">${esc(renderItemText(it))}</span>` +
-        (hasOv ? `<span class="item-warn" title="${ovTitle}">⚠</span>` : '');
-      el.addEventListener('click', () => showDetail(it));
-      body.appendChild(el);
-    });
+        const ovCross = crossOverlap.has(it.id);
+        const ovWork = workOverlap.has(it.id);
+        const ovDaily = dailyOverlap.has(it.id);
+        let ovClass = '', ovTitle = '';
+        if (ovCross) { ovClass = 'overlap-cross'; ovTitle = '跨表冲突：工作与日常时间重叠'; }
+        else if (ovWork) { ovClass = 'overlap-work'; ovTitle = '工作冲突：时间重叠'; }
+        else if (ovDaily) { ovClass = 'overlap-daily'; ovTitle = '日常提醒：时间重叠（允许重叠）'; }
+        const hasOv = ovClass !== '';
+        // 复用可复用卡片组件 renderItemCard（余力加练 Day 8）
+        const card = renderItemCard(it, {
+          showMark: currentMode === 'all',
+          warn: hasOv ? { title: ovTitle } : null,
+        });
+        if (hasOv) card.classList.add(ovClass);
+        body.appendChild(card);
+      });
     col.appendChild(body);
     timeline.appendChild(col);
   }
