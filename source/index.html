@@ -15,7 +15,8 @@
       <button id="btn-prev-week" title="上一周">‹ 上周</button>
       <button id="btn-next-week" title="下一周">下周 ›</button>
       <button id="btn-new" class="primary" title="新建事项">+ 新建</button>
-      <button id="btn-import" disabled title="导入识别：第 3 周接入 OCR API（外部 AI 接口），本版仅预留 importSchedule() 接口">导入</button>
+      <button id="btn-settings" title="设置：自定义部门、标记、类型颜色、默认视图">设置</button>
+      <button id="btn-import" title="导入日程（JSON）；图片/Excel 识别待第 3 周 OCR 接入">导入</button>
     </div>
   </header>
 
@@ -79,6 +80,62 @@
     - 空闲时间总览（设想②）：每个表一个、独立、半小时粒度；导出与 AI 精细化网格为后续。
       <section id="free-time-overview" class="free-time"></section>
   -->
+
+  <!-- 设置弹窗（Day 9）：自定义部门 / 标记 / 类型颜色 / 默认视图 / 数据导入导出 -->
+  <div class="modal-overlay" id="settings-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-label="设置">
+      <div class="modal-head">
+        <h2>设置</h2>
+        <button class="modal-close" id="btn-settings-close" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <p class="set-hint">所有配置暂存于浏览器内存，刷新页面会重置；接入腾讯文档后自动改为云端保存（见 PRD §6）。</p>
+
+        <section class="set-section">
+          <h4>1 · 自定义部门与标记</h4>
+          <ul class="owner-list" id="owner-list"></ul>
+          <div class="owner-add">
+            <input id="new-owner-name" type="text" placeholder="部门名称" aria-label="新部门名称">
+            <input id="new-owner-mark" type="text" placeholder="符号" maxlength="2" style="width:56px" aria-label="新部门记号">
+            <button class="primary" id="btn-add-owner">+ 新增部门</button>
+          </div>
+          <div class="set-actions">
+            <button id="btn-export-owners">导出部门配置</button>
+            <button id="btn-import-owners">导入部门配置</button>
+            <input type="file" id="file-import-owners" accept="application/json" hidden>
+          </div>
+        </section>
+
+        <hr>
+
+        <section class="set-section">
+          <h4>2 · 类型颜色</h4>
+          <p class="set-hint">调整 6 个类型色；白字需 ≥4.5:1（低于会提示，防止调回不达标浅色）。</p>
+          <div id="color-list"></div>
+        </section>
+
+        <hr>
+
+        <section class="set-section">
+          <h4>3 · 通用</h4>
+          <label class="set-row">默认启动视图
+            <select id="set-default-view">
+              <option value="work">工作事项表</option>
+              <option value="daily">日常事项表</option>
+              <option value="all">总表</option>
+            </select>
+          </label>
+          <h4>日程数据（JSON 导入/导出）</h4>
+          <div class="set-actions">
+            <button id="btn-export-data">导出全部日程</button>
+            <button id="btn-import-data">导入日程</button>
+            <input type="file" id="file-import-data" accept="application/json" hidden>
+          </div>
+          <p class="set-hint">顶部「导入」按钮同样走 JSON；图片 / Excel 识别待第 3 周 OCR 接入。</p>
+        </section>
+      </div>
+    </div>
+  </div>
 
   <script src="js/timeline.js"></script>
 </body>

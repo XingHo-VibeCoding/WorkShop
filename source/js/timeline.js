@@ -7,13 +7,23 @@ const WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '�
 /* 记号 = 部门 / 人物（是否私人）。颜色 = 日程类型。
    用户 2026-09-20：记号只做部门与人物区分（私人），不表示类型；类型用颜色区分。
    后续多用户：每人各自记号；avatarUrl 可来自导入图片或腾讯文档/会议默认头像。 */
-const OWNERS = [
-  { key: 'self',   name: '我(部门)', mark: '★' },
-  { key: 'depta',  name: '综合部',   mark: '△' },
-  { key: 'deptb',  name: '业务部',   mark: '○' },
-  { key: 'deptc',  name: '技术部',   mark: '□' },
-  { key: 'deptd',  name: '外联部',   mark: '☆' },
-  { key: 'me',     name: '我(私人)', mark: '我' },
+/* [Day 9] 自定义部门：由设置弹窗增删改驱动；默认两项（我部门/我私人）受保护不可删。
+   持久化：暂存内存，刷新重置；接入腾讯文档后改为云端同步（见 PRD §6）。 */
+let OWNERS = [
+  { key: 'self',   name: '我(部门)', mark: '★', avatarUrl: null },
+  { key: 'depta',  name: '综合部',   mark: '△', avatarUrl: null },
+  { key: 'deptb',  name: '业务部',   mark: '○', avatarUrl: null },
+  { key: 'deptc',  name: '技术部',   mark: '□', avatarUrl: null },
+  { key: 'deptd',  name: '外联部',   mark: '☆', avatarUrl: null },
+  { key: 'me',     name: '我(私人)', mark: '我', avatarUrl: null },
+];
+const PROTECTED_OWNER_KEYS = ['self', 'me'];
+// [Day 9] 默认启动视图（设置可改，暂存内存）
+let defaultStartMode = 'work';
+// [Day 9] 类型色键值对照（设置可改，实时写入 CSS 变量）
+const TYPE_COLOR_DEFS = [
+  ['meeting', '会议'], ['trip', '行程'], ['pending', '待安排'],
+  ['class', '课表'], ['sport', '运动'], ['life', '生活'],
 ];
 const ownerOf = key => OWNERS.find(o => o.key === key) || OWNERS[OWNERS.length - 1];
 
@@ -112,7 +122,8 @@ function seedItems(monday) {
 
 let items = [];
 let currentOffset = 0;
-let currentMode = 'work';
+let currentMode = defaultStartMode;
+let currentItem = null;  // [Day 9] 跟踪当前详情项，便于设置变更后实时刷新
 
 // ---- 渲染接缝：默认纯文本；后续接 PreText 时在此切换排版后端 ----
 /* 后续方向（用户 2026-09-21 定，选 B 推迟）：做 PreText 与纯 CSS 两套渲染后端对照——
@@ -265,6 +276,7 @@ function render() {
 }
 
 function showDetail(item) {
+  currentItem = item || null;
   const d = document.getElementById('detail');
   if (!item) {
     d.innerHTML = `<p class="detail-empty">点击时间线上的事项查看详情，或点「+ 新建」添加。底部可切换工作/日常/总表。</p>${legendHTML()}`;
@@ -429,6 +441,13 @@ document.getElementById('sheet-tabs').addEventListener('click', e => {
   render();
 });
 
+// [Day 9] 初始/设置中切换默认视图：定位当前表签的 active 态并刷新
+function activateModeTab(mode) {
+  currentMode = mode;
+  document.querySelectorAll('#sheet-tabs button').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  render();
+}
+
 // ---- 启动：进入加载态 → 异步取数 → 成功/空/错误 ----
 async function bootstrap() {
   setState('loading');
@@ -442,4 +461,211 @@ async function bootstrap() {
     setState('error', e.message || '日程数据加载出错，请重试。');
   }
 }
+
+// 首次启动按默认视图定位表签
+currentMode = defaultStartMode;
+activateModeTab(currentMode);
 bootstrap();
+
+// =================== [Day 9] 设置系统（实装） ===================
+// 白字对比校验：WCAG AA 要求白字 on 背景 ≥4.5:1，防止把类型色调回不达标浅色
+function relLuminance(hex) {
+  const c = (hex || '#000').replace('#', '');
+  const ch = h => parseInt(h, 16) / 255;
+  const r = ch(c.substr(0, 2)), g = ch(c.substr(2, 2)), b = ch(c.substr(4, 2));
+  const f = v => v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+}
+function whiteContrast(hex) { return 1.05 / (relLuminance(hex) + 0.05); }
+function isSafeBg(hex) { return whiteContrast(hex) >= 4.5; }
+
+let resetDrag = () => {};
+function openSettings() { renderSettings(); const m = document.getElementById('settings-modal'); m.hidden = false; resetDrag(); }
+function closeSettings() { document.getElementById('settings-modal').hidden = true; }
+
+function renderSettings() {
+  renderOwnerList();
+  renderColorList();
+  document.getElementById('set-default-view').value = defaultStartMode;
+}
+
+// 部门/标记变更后：实时刷新时间线 + 当前详情
+function afterOwnerChange() {
+  render();
+  if (currentItem) showDetail(currentItem);
+}
+
+function renderOwnerList() {
+  const ul = document.getElementById('owner-list');
+  ul.innerHTML = '';
+  OWNERS.forEach(o => {
+    const prot = PROTECTED_OWNER_KEYS.includes(o.key);
+    const li = document.createElement('li');
+    li.innerHTML = `
+      <span class="owner-mark">${o.avatarUrl ? `<img src="${o.avatarUrl}" alt="">` : esc(o.mark)}</span>
+      <input class="o-name" type="text" value="${esc(o.name)}" data-key="${o.key}" aria-label="部门名称">
+      <input type="text" value="${esc(o.mark)}" maxlength="2" data-key="${o.key}" ${prot ? 'disabled' : ''} aria-label="记号" style="width:46px">
+      <button data-key="${o.key}" title="设置图片徽章">图</button>
+      <input type="file" accept="image/*" hidden data-key="${o.key}">
+      ${prot ? '' : `<button data-key="${o.key}" class="owner-del" title="删除">删</button>`}
+    `;
+    ul.appendChild(li);
+  });
+  ul.querySelectorAll('.o-name').forEach(inp => inp.addEventListener('input', e => {
+    const o = OWNERS.find(x => x.key === e.target.dataset.key);
+    if (o) { o.name = e.target.value; afterOwnerChange(); }
+  }));
+  ul.querySelectorAll('input[type=text][maxlength="2"]').forEach(inp => inp.addEventListener('input', e => {
+    const o = OWNERS.find(x => x.key === e.target.dataset.key);
+    if (o) { o.mark = e.target.value; afterOwnerChange(); }
+  }));
+  ul.querySelectorAll('button:not(.owner-del)').forEach(btn => btn.addEventListener('click', () => btn.nextElementSibling.click()));
+  ul.querySelectorAll('input[type=file]').forEach(f => f.addEventListener('change', e => {
+    const o = OWNERS.find(x => x.key === e.target.dataset.key);
+    const file = e.target.files[0]; if (!o || !file) return;
+    const r = new FileReader();
+    r.onload = ev => { o.avatarUrl = ev.target.result; afterOwnerChange(); renderOwnerList(); };
+    r.readAsDataURL(file);
+  }));
+  ul.querySelectorAll('.owner-del').forEach(btn => btn.addEventListener('click', () => {
+    OWNERS = OWNERS.filter(x => x.key !== btn.dataset.key);
+    afterOwnerChange(); renderOwnerList();
+  }));
+}
+
+function addOwner() {
+  const n = document.getElementById('new-owner-name');
+  const mk = document.getElementById('new-owner-mark');
+  const name = n.value.trim();
+  if (!name) { alert('请填写部门名称'); return; }
+  OWNERS.push({ key: 'dept' + Date.now(), name, mark: mk.value.trim() || '●', avatarUrl: null });
+  n.value = ''; mk.value = '';
+  afterOwnerChange(); renderOwnerList();
+}
+
+const TYPE_COLOR_VARS = {
+  meeting: '--c-meeting', trip: '--c-trip', pending: '--c-pending',
+  class: '--c-class', sport: '--c-sport', life: '--c-life'
+};
+function renderColorList() {
+  const wrap = document.getElementById('color-list');
+  wrap.innerHTML = '';
+  TYPE_COLOR_DEFS.forEach(([key, label]) => {
+    const cur = getComputedStyle(document.documentElement).getPropertyValue(TYPE_COLOR_VARS[key]).trim() || '#2f6fed';
+    const row = document.createElement('div');
+    row.className = 'color-row';
+    row.innerHTML = `
+      <span class="c-label">${label}</span>
+      <input type="color" data-key="${key}" value="${cur}">
+      <input class="c-hex" readonly value="${cur}">
+      <span class="c-warn" data-key="${key}" hidden>白字对比不足</span>
+    `;
+    wrap.appendChild(row);
+  });
+  wrap.querySelectorAll('input[type=color]').forEach(inp => inp.addEventListener('input', e => {
+    const key = e.target.dataset.key, val = e.target.value;
+    const row = e.target.closest('.color-row');
+    row.querySelector('.c-hex').value = val;
+    if (isSafeBg(val)) {
+      row.querySelector('.c-warn').hidden = true;
+      document.documentElement.style.setProperty(TYPE_COLOR_VARS[key], val); // 达标才应用
+    } else {
+      row.querySelector('.c-warn').hidden = false; // 低于 4.5:1 不应用，防调回不达标浅色
+    }
+    render();
+  }));
+}
+
+function downloadJSON(obj, filename) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = filename; a.click();
+  URL.revokeObjectURL(a.href);
+}
+function exportOwners() { downloadJSON({ version: 1, owners: OWNERS }, 'workshop-owners.json'); }
+function importOwners(file) {
+  const r = new FileReader();
+  r.onload = ev => {
+    try {
+      const data = JSON.parse(ev.target.result);
+      if (!data.owners || !Array.isArray(data.owners)) throw new Error('缺少 owners 数组');
+      const prot = OWNERS.filter(o => PROTECTED_OWNER_KEYS.includes(o.key));
+      const incoming = data.owners.filter(o => !PROTECTED_OWNER_KEYS.includes(o.key))
+        .map(o => ({ key: o.key || ('dept' + Date.now() + Math.floor(Math.random() * 1e4)), name: o.name || '未命名', mark: o.mark || '●', avatarUrl: o.avatarUrl || null }));
+      OWNERS = [...prot, ...incoming];
+      afterOwnerChange(); renderOwnerList();
+      alert('部门配置已导入');
+    } catch (err) { alert('导入失败：' + err.message); }
+  };
+  r.readAsText(file);
+}
+function exportData() {
+  downloadJSON({ version: 1, items: items.map(it => ({ ...it, start: it.start.toISOString() })) }, 'workshop-schedule.json');
+}
+function importData(file) {
+  const r = new FileReader();
+  r.onload = ev => {
+    try {
+      const data = JSON.parse(ev.target.result);
+      if (!data.items || !Array.isArray(data.items)) throw new Error('缺少 items 数组');
+      items = data.items.map(it => ({ ...it, start: new Date(it.start) }));
+      currentOffset = 0;
+      afterMutation(true);
+      alert('日程已导入');
+    } catch (err) { alert('导入失败：' + err.message); }
+  };
+  r.readAsText(file);
+}
+
+// ---- 设置相关事件绑定（Day 9 实装）----
+document.getElementById('btn-settings').addEventListener('click', openSettings);
+document.getElementById('btn-settings-close').addEventListener('click', closeSettings);
+document.getElementById('settings-modal').addEventListener('click', e => { if (e.target.id === 'settings-modal') closeSettings(); });
+document.getElementById('set-default-view').addEventListener('change', e => { defaultStartMode = e.target.value; }); // 下次刷新生效
+document.getElementById('btn-add-owner').addEventListener('click', addOwner);
+document.getElementById('btn-export-owners').addEventListener('click', exportOwners);
+document.getElementById('btn-import-owners').addEventListener('click', () => document.getElementById('file-import-owners').click());
+document.getElementById('file-import-owners').addEventListener('change', e => { if (e.target.files[0]) importOwners(e.target.files[0]); e.target.value = ''; });
+document.getElementById('btn-export-data').addEventListener('click', exportData);
+document.getElementById('btn-import-data').addEventListener('click', () => document.getElementById('file-import-data').click());
+document.getElementById('file-import-data').addEventListener('change', e => { if (e.target.files[0]) importData(e.target.files[0]); e.target.value = ''; });
+// 顶部「导入」按钮：同样走 JSON 导入（图片/Excel 识别待第 3 周 OCR 接入）
+document.getElementById('btn-import').addEventListener('click', () => document.getElementById('file-import-data').click());
+
+// ---- 弹窗可拖动（标题栏为手柄，鼠标/触摸通用，边界防拖出屏幕）----
+function makeDraggable(panel, handle) {
+  let dragging = false, lastX = 0, lastY = 0, dx = 0, dy = 0;
+  handle.style.cursor = 'grab';
+  handle.addEventListener('pointerdown', e => {
+    if (e.target.closest('.modal-close')) return; // 不拦截关闭按钮
+    dragging = true;
+    lastX = e.clientX; lastY = e.clientY;
+    try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+    handle.style.cursor = 'grabbing';
+    e.preventDefault();
+  });
+  handle.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    dx += e.clientX - lastX; dy += e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    const rect = panel.getBoundingClientRect();
+    const maxX = Math.max(0, (window.innerWidth - rect.width) / 2);
+    const maxY = Math.max(0, (window.innerHeight - rect.height) / 2);
+    dx = Math.max(-maxX, Math.min(maxX, dx));
+    dy = Math.max(-maxY, Math.min(maxY, dy));
+    panel.style.transform = `translate(${dx}px, ${dy}px)`;
+  });
+  const end = e => {
+    if (!dragging) return;
+    dragging = false;
+    handle.style.cursor = 'grab';
+    try { handle.releasePointerCapture(e.pointerId); } catch (_) {}
+  };
+  handle.addEventListener('pointerup', end);
+  handle.addEventListener('pointercancel', end);
+  return () => { dx = 0; dy = 0; panel.style.transform = ''; };
+}
+resetDrag = makeDraggable(
+  document.querySelector('#settings-modal .modal'),
+  document.querySelector('#settings-modal .modal-head')
+);
