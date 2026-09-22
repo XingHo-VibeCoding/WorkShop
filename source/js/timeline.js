@@ -122,6 +122,8 @@ function seedItems(monday) {
 
 let items = [];
 let currentOffset = 0;
+// [Day 10] 周切换可浏览范围：以本周(offset=0)为原点，前后各 4 周，防无限翻页、也便于演示到边界
+const WEEK_MIN = -4, WEEK_MAX = 4;
 let currentMode = defaultStartMode;
 let currentItem = null;  // [Day 9] 跟踪当前详情项，便于设置变更后实时刷新
 
@@ -273,6 +275,18 @@ function render() {
   if (dn) ovParts.push(`日常⚠${dn}`);
   if (cn) ovParts.push(`跨表⚠${cn}`);
   document.getElementById('stat-overlap').textContent = ovParts.length ? `重叠：${ovParts.join(' / ')}` : '重叠：无';
+
+  // [Day 10] 周切换边界反馈：到达最早/最晚可查看周时禁用对应按钮并给出状态栏提示
+  const prevBtn = document.getElementById('btn-prev-week');
+  const nextBtn = document.getElementById('btn-next-week');
+  const weekHint = document.getElementById('stat-week-hint');
+  const atMin = currentOffset <= WEEK_MIN, atMax = currentOffset >= WEEK_MAX;
+  prevBtn.disabled = atMin;
+  nextBtn.disabled = atMax;
+  prevBtn.title = atMin ? `已到最早可查看周（往前最多 ${Math.abs(WEEK_MIN)} 周）` : '上一周';
+  nextBtn.title = atMax ? `已到最晚可查看周（往后最多 ${WEEK_MAX} 周）` : '下一周';
+  weekHint.textContent = atMin ? `⚠ 已到最早可查看周（往前最多 ${Math.abs(WEEK_MIN)} 周）`
+    : atMax ? `⚠ 已到最晚可查看周（往后最多 ${WEEK_MAX} 周）` : '';
 }
 
 function showDetail(item) {
@@ -424,8 +438,8 @@ function setupDragTransfer() { /* TODO: 拖拽改期 / 转移到其他表或删�
 function computeFreeTime(view) { /* TODO(设想②): 以半小时为单位统计每日空闲，后续支持导出 + AI 精细化 */ }
 
 // 周切换
-document.getElementById('btn-prev-week').addEventListener('click', () => { currentOffset--; bootstrap(); });
-document.getElementById('btn-next-week').addEventListener('click', () => { currentOffset++; bootstrap(); });
+document.getElementById('btn-prev-week').addEventListener('click', () => { currentOffset = Math.max(WEEK_MIN, currentOffset - 1); bootstrap(); });
+document.getElementById('btn-next-week').addEventListener('click', () => { currentOffset = Math.min(WEEK_MAX, currentOffset + 1); bootstrap(); });
 // 新建
 document.getElementById('btn-new').addEventListener('click', () => renderForm(null));
 // 空状态「新建」
