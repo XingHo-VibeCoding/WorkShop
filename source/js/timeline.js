@@ -123,6 +123,33 @@ function seedItems(monday) {
 let items = [];
 // [Day 11] 已删除项 id 集合：种子数据每次切周会被 loadItems 重灌，靠此集合让删除跨周持久（仅内存态，刷新重置）
 const deletedIds = new Set();
+
+// =================== [Day 12] 筛选状态：类型 + 关键词（纯前端过滤，不依赖后端）===================
+// frontend-guidelines §2: 筛选不改变类型色语义；§7: 控件 aria-label 由 HTML 提供、键盘可达
+let filterState = { type: 'all', keyword: '' };
+
+// 在三模式 view 之上再叠加筛选（类型 + 关键词）；无条件时原样返回，不破坏现有渲染
+function applyFilter(list) {
+  const { type, keyword } = filterState;
+  const kw = keyword.trim().toLowerCase();
+  if (type === 'all' && !kw) return list;
+  return list.filter(it => {
+    const typeOk = type === 'all' || it.type === type;
+    const kwOk = !kw || String(it.title || '').toLowerCase().includes(kw);
+    return typeOk && kwOk;
+  });
+}
+
+// 筛选条件描述（用于无结果空状态提示）
+function filterDesc() {
+  const parts = [];
+  if (filterState.type !== 'all') {
+    const def = TYPE_COLOR_DEFS.find(([k]) => k === filterState.type);
+    parts.push(def ? def[1] : filterState.type);
+  }
+  if (filterState.keyword.trim()) parts.push(`含“${filterState.keyword.trim()}”`);
+  return parts.join('、') || '全部';
+}
 let currentOffset = 0;
 // [Day 10] 周切换可浏览范围：以本周(offset=0)为原点，前后各 4 周，防无限翻页、也便于演示到边界
 const WEEK_MIN = -4, WEEK_MAX = 4;
@@ -220,6 +247,10 @@ function render() {
 
   const candidates = items.filter(it => it.start >= monday && it.start <= sunday);
   const view = currentMode === 'all' ? candidates : candidates.filter(it => it.table === currentMode);
+  // [Day 12] 在三模式 view 之上叠加筛选（类型+关键词）；重叠检测仍用 candidates 不变
+  // frontend-guidelines §2: 筛选不改类型色；§6: 筛后点击详情等交互不失效
+  const hasFilter = filterState.type !== 'all' || filterState.keyword.trim() !== '';
+  const filtered = applyFilter(view);
 
   const workItems = candidates.filter(it => it.table === 'work');
   const dailyItems = candidates.filter(it => it.table === 'daily');
@@ -241,7 +272,7 @@ function render() {
 
     const body = document.createElement('div');
     body.className = 'day-body';
-    view.filter(it => it.start.getTime() === dayDate.getTime())
+    filtered.filter(it => it.start.getTime() === dayDate.getTime())
       .sort((a, b) => a.startTime.localeCompare(b.startTime) || a.endTime.localeCompare(b.endTime))
       .forEach(it => {
         const ovCross = crossOverlap.has(it.id);
@@ -264,14 +295,24 @@ function render() {
     timeline.appendChild(col);
   }
 
+  // [Day 12] 筛选无结果：覆盖 7 列空壳，改为友好提示（区别于"本周无事项"空状态）
+  // frontend-guidelines §1: 空提示在时间线区内、不另起状态层；§6: 清空后此处自动恢复 7 列
+  if (hasFilter && filtered.length === 0) {
+    timeline.innerHTML = `<div class="filter-empty">
+      <p class="filter-empty-title">未找到匹配${esc(filterDesc())}的事项</p>
+      <p class="filter-empty-hint">试试调整条件，或点「清空筛选」恢复全部事项。</p>
+    </div>`;
+  }
+
   const weekLabel = currentOffset === 0 ? '本周' : (currentOffset > 0 ? '下' + currentOffset + '周' : '上' + (-currentOffset) + '周');
   document.getElementById('week-range').textContent = `${fmtMD(monday)} ~ ${fmtMD(sunday)} · ${weekLabel}`;
   const modeLabel = (MODES.find(x => x.key === currentMode) || {}).label || '';
   document.getElementById('stat-week').textContent = `当前周：${weekLabel}`;
-  document.getElementById('stat-count').textContent = `事项（${modeLabel}）：${view.length}`;
-  const wn = [...workOverlap].filter(id => view.some(v => v.id === id)).length;
-  const dn = [...dailyOverlap].filter(id => view.some(v => v.id === id)).length;
-  const cn = [...crossOverlap].filter(id => view.some(v => v.id === id)).length;
+  // [Day 12] 计数反映筛后数；有筛选时标注"筛选中"让用户知道当前是过滤态
+  document.getElementById('stat-count').textContent = `事项（${modeLabel}）：${filtered.length}${hasFilter ? ' · 筛选中' : ''}`;
+  const wn = [...workOverlap].filter(id => filtered.some(v => v.id === id)).length;
+  const dn = [...dailyOverlap].filter(id => filtered.some(v => v.id === id)).length;
+  const cn = [...crossOverlap].filter(id => filtered.some(v => v.id === id)).length;
   const ovParts = [];
   if (wn) ovParts.push(`工作⚠${wn}`);
   if (dn) ovParts.push(`日常⚠${dn}`);
@@ -830,3 +871,18 @@ resetDrag = makeDraggable(
   document.querySelector('#settings-modal .modal'),
   document.querySelector('#settings-modal .modal-head')
 );
+
+// =================== [Day 12] 筛选交互（类型 + 关键词，纯前端）===================
+// frontend-guidelines §7: 控件键盘可达(Tab/Enter)、:focus-visible 由全局样式覆盖；
+// §3: 清空按钮三态；§6: 切换条件实时重渲染、清空恢复全部、交互不失效
+const filterTypeEl = document.getElementById('filter-type');
+const filterKeywordEl = document.getElementById('filter-keyword');
+const filterClearEl = document.getElementById('filter-clear');
+filterTypeEl.addEventListener('change', () => { filterState.type = filterTypeEl.value; render(); });
+filterKeywordEl.addEventListener('input', () => { filterState.keyword = filterKeywordEl.value; render(); });
+filterClearEl.addEventListener('click', () => {
+  filterState = { type: 'all', keyword: '' };
+  filterTypeEl.value = 'all';
+  filterKeywordEl.value = '';
+  render();
+});

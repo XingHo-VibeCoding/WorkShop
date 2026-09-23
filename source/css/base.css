@@ -368,3 +368,41 @@ body { display: flex; flex-direction: column; height: 100vh; }
   .modal--pretext .modal-body,
   .modal--pretext .del-actions { transform: none !important; }
 }
+
+/* ===== [Day 12] 筛选条：类型 + 关键词，纯前端过滤 ===== */
+/* frontend-guidelines §1: 紧接上栏、不另立主标题；§2: 14px 正文、对比度 AA（复用 --ink/--ink-soft）；
+   §3: 清空按钮三态；§4: flex-wrap 防 360px 横向溢出；§7: 焦点轮廓由全局 :focus-visible 覆盖 */
+.filter-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  padding: 9px 18px; background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.filter-field { display: inline-flex; align-items: center; gap: 6px; }
+.filter-label { font-size: 12px; color: var(--ink-soft); white-space: nowrap; }
+.filter-bar select,
+.filter-bar input[type=search] {
+  padding: 6px 9px; font-size: 14px; font-family: inherit; color: var(--ink);
+  background: #fff; border: 1px solid var(--line); border-radius: 6px;
+  min-width: 0; /* 防止 flex 子项撑爆窄屏 */
+}
+.filter-bar select { width: auto; }
+.filter-bar input[type=search] { width: 160px; max-width: 40vw; }
+.filter-clear {
+  margin-left: auto; padding: 7px 14px; font-size: 13px;
+  border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--ink);
+  cursor: pointer; transition: .15s;
+}
+.filter-clear:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.filter-clear:active:not(:disabled) { transform: scale(.97); }
+.filter-clear:disabled { opacity: .45; cursor: not-allowed; }
+
+/* 筛选无结果提示（区别于"本周无事项"空状态） */
+.filter-empty { text-align: center; padding: 48px 18px; color: var(--ink-soft); }
+.filter-empty-title { font-size: 15px; font-weight: 600; color: var(--ink); margin: 0 0 8px; }
+.filter-empty-hint { font-size: 13px; margin: 0; line-height: 1.6; }
+
+@media (max-width: 768px) {
+  .filter-bar { padding: 8px 12px; gap: 8px; }
+  .filter-bar input[type=search] { width: 100%; flex: 1 1 60%; max-width: none; }
+  .filter-clear { margin-left: 0; flex: 1 1 auto; }
+}

@@ -12,13 +12,35 @@
     <div class="brand">WorkShop <span class="brand-sub">会议工作台</span></div>
     <div class="week-range" id="week-range">—</div>
     <div class="actions">
-      <button id="btn-prev-week" title="上一周">‹ 上周</button>
-      <button id="btn-next-week" title="下一周">下周 ›</button>
-      <button id="btn-new" class="primary" title="新建事项">+ 新建</button>
+      <button id="btn-prev-week">‹ 上周</button>
+      <button id="btn-next-week">下周 ›</button>
+      <button id="btn-new" class="primary">+ 新建</button>
       <button id="btn-settings" title="设置：自定义部门、标记、类型颜色、默认视图">设置</button>
       <button id="btn-import" title="导入日程（JSON）；图片/Excel 识别待第 3 周 OCR 接入">导入</button>
     </div>
   </header>
+
+  <!-- [Day 12] 筛选条：类型 + 关键词（纯前端过滤，不依赖后端） -->
+  <!-- frontend-guidelines §1: 属上栏下方、不另立主标题；§7: role=search + aria-label + 键盘可达 -->
+  <div class="filter-bar" role="search" aria-label="筛选时间线事项">
+    <label class="filter-field">
+      <span class="filter-label">类型</span>
+      <select id="filter-type" aria-label="按类型筛选事项">
+        <option value="all">全部</option>
+        <option value="meeting">会议</option>
+        <option value="trip">行程</option>
+        <option value="pending">待安排</option>
+        <option value="class">课表</option>
+        <option value="sport">运动</option>
+        <option value="life">生活</option>
+      </select>
+    </label>
+    <label class="filter-field">
+      <span class="filter-label">关键词</span>
+      <input id="filter-keyword" type="search" placeholder="搜索标题" aria-label="按关键词搜索事项标题">
+    </label>
+    <button id="filter-clear" class="filter-clear" aria-label="清空筛选条件，恢复全部事项">清空筛选</button>
+  </div>
 
   <!-- 主体：左时间线(主栏) / 右详情(侧栏) -->
   <main class="layout">
