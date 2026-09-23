@@ -99,7 +99,7 @@ function loadItems(weekOffset = 0) {
     setTimeout(() => {
       if (debug === 'empty') return resolve([]);                       // 演示「空」状态
       if (debug === 'error') return reject(new Error('模拟：腾讯文档读取失败（401 未授权）')); // 演示「错误」状态
-      resolve(seedItems(mondayOf(weekOffset)));                        // 正常：返回 mock 数据
+      resolve(seedItems(mondayOf(weekOffset)).filter(it => !deletedIds.has(it.id))); // 正常：返回 mock 数据，并剔除已删除项（跨周持久）
     }, 600);
   });
 }
@@ -121,6 +121,8 @@ function seedItems(monday) {
 }
 
 let items = [];
+// [Day 11] 已删除项 id 集合：种子数据每次切周会被 loadItems 重灌，靠此集合让删除跨周持久（仅内存态，刷新重置）
+const deletedIds = new Set();
 let currentOffset = 0;
 // [Day 10] 周切换可浏览范围：以本周(offset=0)为原点，前后各 4 周，防无限翻页、也便于演示到边界
 const WEEK_MIN = -4, WEEK_MAX = 4;
@@ -406,12 +408,157 @@ function saveItem(existing) {
   afterMutation();
 }
 
+// ---- 删除确认弹窗（Day 11）：页面内状态机，替代原生 confirm() ----
+/* 状态机：confirm(确认弹窗) → loading(处理中) → success(移除+刷新) / fail(红字+重试)
+   最明确的“生效”反馈 = 点击删除后按钮立即进入 loading 禁用态(spinner) + 成功后卡片可见消失。 */
 function deleteItem(id) {
   const it = items.find(x => x.id === id);
   if (!it) return;
-  if (!confirm(`确定删除「${it.title}」？\n此操作仅从本地内存移除（尚未接入腾讯文档，不会同步删除云端）。`)) return;
-  items = items.filter(x => x.id !== id);
-  afterMutation(true);
+  openDeleteModal(it);
+}
+
+// loading 期间锁定用户关闭（遮罩/Esc），防止“以为取消实则已删”的歧义
+let _delUserCloseLocked = false;
+
+function openDeleteModal(item) {
+  const overlay = document.getElementById('delete-modal');
+  const body = document.getElementById('delete-body');
+  if (!overlay || !body) return;
+  _delUserCloseLocked = false; // 确认态可关闭
+  // 注入「确认」状态
+  body.innerHTML =
+    `<p class="del-msg">确定要删除「<b>${esc(item.title)}</b>」吗？</p>` +
+    `<p class="del-sub">此操作仅从本地内存移除（尚未接入腾讯文档，不会同步删除云端）。</p>` +
+    `<div class="del-actions">` +
+      `<button id="del-cancel">取消</button>` +
+      `<button class="btn-danger" id="del-confirm">删除</button>` +
+    `</div>`;
+  // PreText 探索版（?debug=pretext / window.USE_PRETEXT）：先加 3D 分层 class（a），测量延后到弹窗显示后做以保证宽度准确
+  const pretextOn = window.USE_PRETEXT || new URLSearchParams(location.search).get('debug') === 'pretext';
+  if (pretextOn) overlay.classList.add('modal--pretext');
+  // 打开：先去 hidden 再触发淡入动画（避开 [hidden]{display:none!important}）
+  overlay.hidden = false;
+  overlay.classList.remove('is-open');
+  void overlay.offsetWidth; // 强制 reflow，确保每次打开重播动画
+  overlay.classList.add('is-open');
+  // 弹窗显示后再做 PreText 真实字形测量（此时 body.clientWidth 为真实宽度，测量才准）；纯 CSS 下此调用直接 return
+  renderModalText(body, item);
+  // 焦点落「取消」防误删；随后可 Tab 到「删除」
+  document.getElementById('del-cancel').focus();
+  // 绑定：取消 / 关闭按钮 / 遮罩点击 / 确认删除
+  document.getElementById('del-cancel').onclick = () => closeDeleteModal();
+  document.getElementById('delete-close').onclick = () => closeDeleteModal();
+  overlay.onclick = (e) => { if (e.target === overlay) closeDeleteModal(); };
+  document.getElementById('del-confirm').onclick = () => runDelete(item);
+  // 键盘：Esc 取消 / Enter 触发主操作（确认态=删除，失败态=重试；loading 态忽略）
+  overlay._keyHandler = (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); closeDeleteModal(); }
+    else if (e.key === 'Enter') {
+      e.preventDefault();
+      const confirm = overlay.querySelector('#del-confirm');
+      if (confirm && !confirm.disabled) confirm.click();
+    }
+  };
+  overlay.addEventListener('keydown', overlay._keyHandler);
+}
+
+function runDelete(item) {
+  const overlay = document.getElementById('delete-modal');
+  const body = document.getElementById('delete-body');
+  if (!body) return;
+  _delUserCloseLocked = true; // loading 中锁定用户关闭
+  // 处理中：spinner + 禁用按钮（用户最明确知道“操作在生效”的信号）
+  body.innerHTML = `<p class="del-loading"><span class="spinner"></span>正在删除「${esc(item.title)}」…</p>`;
+  // 失败分支：?debug=delfail 模拟后端错误
+  const fail = new URLSearchParams(location.search).get('debug') === 'delfail';
+  setTimeout(() => {
+    if (fail) {
+      _delUserCloseLocked = false; // 失败态解锁，可取消
+      body.innerHTML =
+        `<p class="del-error del-error-shake">删除失败：网络异常，请稍后重试。</p>` +
+        `<div class="del-actions">` +
+          `<button id="del-cancel">取消</button>` +
+          `<button class="btn-danger" id="del-confirm">重试</button>` +
+        `</div>`;
+      document.getElementById('del-cancel').onclick = () => closeDeleteModal();
+      document.getElementById('del-confirm').onclick = () => runDelete(item);
+    } else {
+      // 成功：移除数据 → 刷新 → 关闭弹窗（卡片可见消失 = 第二个生效信号）
+      deletedIds.add(item.id); // 标记已删，切周重灌种子后也不复活
+      items = items.filter(x => x.id !== item.id);
+      afterMutation(true);
+      _delUserCloseLocked = false;
+      closeDeleteModal();
+    }
+  }, 700);
+}
+
+function closeDeleteModal() {
+  const overlay = document.getElementById('delete-modal');
+  if (!overlay || overlay.hidden) return;
+  if (_delUserCloseLocked) return; // loading 中锁定用户关闭
+  overlay.classList.remove('modal--pretext'); // 清掉 PreText 探索版的 3D 分层 class
+  overlay.classList.remove('is-open');
+  overlay.hidden = true;
+  overlay.onclick = null;
+  if (overlay._keyHandler) { overlay.removeEventListener('keydown', overlay._keyHandler); overlay._keyHandler = null; }
+  // 焦点返回触发按钮（若存在；删除成功后详情可能被清空则跳过）
+  const trigger = document.getElementById('btn-delete');
+  if (trigger) trigger.focus();
+}
+
+// ---- 弹窗文案排版接缝（PreText 探索版，备后续统一风格替换）----
+/* 与 renderItemText 同思路：默认纯 CSS；启用 PreText 时走真实字形测量（CDN 不可达自动降级）。
+   当前弹窗文案极短，PreText 主要用于验证“零 reflow 真实测量”在弹窗场景同样可用。 */
+let _pretextMod = null;
+async function ensurePretext() {
+  if (_pretextMod !== null) return _pretextMod;
+  const on = window.USE_PRETEXT || new URLSearchParams(location.search).get('debug') === 'pretext';
+  if (!on) { _pretextMod = false; return _pretextMod; }
+  try {
+    _pretextMod = await import('https://esm.sh/@chenglou/pretext@0.0.9');
+  } catch (e) {
+    console.warn('[PreText] CDN 不可达，降级 CSS 默认排版', e);
+    _pretextMod = false;
+  }
+  return _pretextMod;
+}
+async function renderModalText(body, item) {
+  const mod = await ensurePretext();
+  if (!mod) return; // 纯 CSS，无需处理
+  const w = Math.max(120, body.clientWidth - 36); // 弹窗已显示，clientWidth 为真实宽度（避免 hidden 期测成 0）
+  // (b) 标题：超 2 行则逐档缩字号（真实字形测量，零 reflow）
+  const titleEl = body.querySelector('.del-msg b');
+  if (titleEl) {
+    let size = 15;
+    try {
+      const font = '600 15px "PingFang SC","Microsoft YaHei",sans-serif';
+      const prep = mod.prepare(titleEl.textContent, font, { whiteSpace: 'normal', wordBreak: 'break-word' });
+      while (size > 11) {
+        const laid = mod.layout(prep, w, size + 6);
+        if (laid.lineCount <= 2) break;
+        size -= 1;
+      }
+      titleEl.style.fontSize = size + 'px';
+      titleEl.style.lineHeight = (size + 6) + 'px';
+    } catch (e) { console.warn('[PreText] 标题测量失败，保持 CSS 默认', e); }
+  }
+  // (b) 扩到正文：副提示 del-sub 同样按真实字形测量，超 2 行缩字号，使 PreText 版与 CSS 版产生可见差异
+  const subEl = body.querySelector('.del-sub');
+  if (subEl) {
+    let size = 12;
+    try {
+      const font = '400 12px "PingFang SC","Microsoft YaHei",sans-serif';
+      const prep = mod.prepare(subEl.textContent, font, { whiteSpace: 'normal', wordBreak: 'break-word' });
+      while (size > 10) {
+        const laid = mod.layout(prep, w, size + 4);
+        if (laid.lineCount <= 2) break;
+        size -= 1;
+      }
+      subEl.style.fontSize = size + 'px';
+      subEl.style.lineHeight = (size + 4) + 'px';
+    } catch (e) { console.warn('[PreText] 副文测量失败，保持 CSS 默认', e); }
+  }
 }
 
 // 变更后刷新：重渲染并根据本周是否还有事项切换 success / empty

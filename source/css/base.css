@@ -293,3 +293,78 @@ body { display: flex; flex-direction: column; height: 100vh; }
 @media (max-width: 768px) {
   .modal { width: 100%; max-height: 90vh; }
 }
+
+/* ===== 删除确认弹窗（Day 11）===== */
+/* 与设置弹窗同构，复用 .modal-overlay / .modal 基础样式；以下仅补充状态样式与动效 */
+
+/* 弹窗淡入：JS 先去掉 [hidden] 再加 .is-open，避开全局 [hidden]{display:none!important} */
+.modal-overlay.is-open { animation: modalIn .18s ease both; }
+.modal-overlay.is-open .modal { animation: modalPop .18s ease both; }
+@keyframes modalIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modalPop {
+  from { transform: translateY(10px) scale(.98); opacity: .6; }
+  to   { transform: translateY(0) scale(1); opacity: 1; }
+}
+
+/* 正文文案 */
+.del-msg  { font-size: 14px; line-height: 1.6; color: var(--ink); margin: 0 0 6px; }
+.del-msg b { font-weight: 600; }
+.del-sub  { font-size: 12px; color: var(--ink-soft); margin: 0 0 16px; }
+
+/* 处理中：spinner + 文案（用户最明确知道“操作在生效”的信号） */
+.del-loading { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--ink); margin: 4px 0 16px; }
+.spinner {
+  width: 18px; height: 18px; flex: none;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* 失败：红色错误原因 + 重试 */
+.del-error { font-size: 13px; color: var(--warn); line-height: 1.5; margin: 0 0 14px; }
+
+/* 底部按钮行 */
+.del-actions { display: flex; gap: 10px; justify-content: flex-end; }
+.del-actions button {
+  padding: 8px 16px; font-size: 13px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--line); background: #fff; color: var(--ink); transition: .15s;
+}
+.del-actions button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.del-actions button:disabled { opacity: .5; cursor: not-allowed; }
+/* 危险主按钮（删除）：用 --warn 红；按下轻微回弹 */
+.btn-danger { background: var(--warn); border-color: var(--warn); color: #fff; }
+.btn-danger:hover:not(:disabled) { background: #a93226; border-color: #a93226; color: #fff; }
+.btn-danger:active:not(:disabled) { transform: scale(.97); }
+
+/* 失败态轻微 shake（克制，政务工具不做弹跳） */
+.del-error-shake { animation: shake .3s ease both; }
+@keyframes shake {
+  10%, 90% { transform: translateX(-1px); }
+  30%, 70% { transform: translateX(2px); }
+  50%      { transform: translateX(-2px); }
+}
+
+/* PreText 版（后续统一风格替换探索）：3D 分层 + 真实字形测量排版开关标记。
+   默认不启用；JS 在 ?debug=pretext 或 window.USE_PRETEXT 为真时给 #delete-modal 加 .modal--pretext */
+.modal--pretext .modal {
+  transform-style: preserve-3d;
+  perspective: 900px;
+  box-shadow: 0 18px 50px rgba(16,24,40,.32), inset 0 1px 0 rgba(255,255,255,.05);
+}
+.modal--pretext .modal-head { transform: translateZ(28px); }
+.modal--pretext .modal-body { transform: translateZ(12px); }
+.modal--pretext .del-actions { transform: translateZ(20px); }
+
+/* 可访问性：尊重系统“减少动态效果”偏好，装饰性动效全部降级 */
+@media (prefers-reduced-motion: reduce) {
+  .modal-overlay.is-open,
+  .modal-overlay.is-open .modal { animation: none !important; transform: none !important; }
+  .del-error-shake { animation: none !important; }
+  .spinner { animation: spin .7s linear infinite !important; } /* spinner 是状态指示，非装饰，保留 */
+  .modal--pretext .modal,
+  .modal--pretext .modal-head,
+  .modal--pretext .modal-body,
+  .modal--pretext .del-actions { transform: none !important; }
+}

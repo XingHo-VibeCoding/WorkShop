@@ -138,6 +138,19 @@
     </div>
   </div>
 
+  <!-- 删除确认弹窗（Day 11）：复用设置弹窗模板，主版 / PreText 版共用同一份 DOM -->
+  <div class="modal-overlay" id="delete-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="delete-title">
+      <div class="modal-head">
+        <h3 id="delete-title">删除确认</h3>
+        <button class="modal-close" id="delete-close" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body" id="delete-body">
+        <!-- 状态内容由 JS 注入：确认 / 处理中 / 成功 / 失败 -->
+      </div>
+    </div>
+  </div>
+
   <script src="js/timeline.js"></script>
 </body>
 </html>
