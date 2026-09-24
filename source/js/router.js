@@ -7,7 +7,6 @@
   const WEEK_WIN = { start: 7, end: 23 };            // 总览时间窗 07:00–23:00
   const SLOTS = (WEEK_WIN.end - WEEK_WIN.start) * 2; // 半小时粒度 → 32 格
   const HEAD_H = 30;   // 日期表头 / 时间轴表头高
-  const HEAD_GAP = 2;  // 表头与首格之间的间距
   const SLOT_PITCH = 11; // 单格行距（9 高 + 2 间隙）
   const HOUR_PITCH = SLOT_PITCH * 2; // 1 小时 = 2 格 = 22px
   const typeName = t => (TYPE_COLOR_DEFS.find(([k]) => k === t) || [, '事项'])[1];
@@ -61,7 +60,8 @@
   // 总览：三表各出一张 7 天 × 32 格空闲网格，占用格按类型着色，空白即空闲
   // [Day 13 调整] 三个格点图水平并排（.ov-tables 横向 flex；窄屏自动换行）
   // [Day 13 调整] 每个网格左侧加时间轴（整点标注，横向滚动时固定），便于按真实时段判断空闲/轻安排
-  // [Day 13 调整] 总表密度着色：单表占用=轻（半透明），工作+日常重叠=重（红框）
+  // [Day 13 调整] 总表密度着色：单表占用=轻（半透明），工作+日常双表重叠=重（红框）
+  // [Day 13 修正] 「重」按「有几张表占用」判定，不再按事项条数——同表内两条事项撞车不算重
   // [Day 13 调整] 整点辅助线改为跨整行的连续横线（.ov-hr），与时刻标签严格对齐
   function renderOverviewView() {
     const body = document.getElementById('overview-body');
@@ -123,14 +123,16 @@
   }
 
   // 单格渲染：空闲=空白；占用按类型着色；总表额外区分轻(半透明)/重(红框)
+  // [Day 13 修正] 轻重按「占用表数」：work+daily 双占=重，恰好一张表占=轻（同表多条事项重叠不影响）
   function ovCell(s, isAll) {
     if (!s.type) return '<div class="ov-slot"></div>';
-    if (isAll && s.count >= 2) {
-      return '<div class="ov-slot filled heavy" style="background:var('
-        + TYPE_COLOR_VARS[s.type] + ')" title="' + esc(typeName(s.type))
-        + ' ×' + s.count + '（工作+日常重叠，安排重）"></div>';
-    }
-    if (isAll && s.count === 1) {
+    if (isAll) {
+      const n = (s.work ? 1 : 0) + (s.daily ? 1 : 0);
+      if (n >= 2) {
+        return '<div class="ov-slot filled heavy" style="background:var('
+          + TYPE_COLOR_VARS[s.type] + ')" title="' + esc(typeName(s.type))
+          + '（工作+日常重叠，安排重）"></div>';
+      }
       return '<div class="ov-slot filled light" style="background:var('
         + TYPE_COLOR_VARS[s.type] + ')" title="' + esc(typeName(s.type))
         + '（单表占用，安排轻）"></div>';
@@ -139,9 +141,12 @@
       + TYPE_COLOR_VARS[s.type] + ')" title="' + esc(typeName(s.type)) + '"></div>';
   }
 
-  // 把 items 映射到 7×SLOTS 占用网格；总表统计 work/daily 重叠数（count）用于轻/重着色
+  // 把 items 映射到 7×SLOTS 占用网格
+  // [Day 13 修正] 每格记录 work/daily 两个占用标志（而非事项计数），
+  // 供总表判定轻/重：双表占=重，单表占=轻；type 取最先写入事项的类型用于着色
   function gridFor(tableKey, days) {
-    const grid = days.map(() => Array.from({ length: SLOTS }, () => ({ type: null, count: 0 })));
+    const grid = days.map(() => Array.from({ length: SLOTS },
+      () => ({ type: null, work: false, daily: false })));
     const toSlot = (h, m) => (h - WEEK_WIN.start) * 2 + (m >= 30 ? 1 : 0);
     items.forEach(it => {
       if (tableKey !== 'all' && it.table !== tableKey) return;
@@ -155,8 +160,8 @@
       let e = toSlot(eh, em);              // 半开区间：e 为结束边界，不占位
       s = Math.max(0, s); e = Math.min(SLOTS, e);
       for (let i = s; i < e && i < SLOTS; i++) {
-        if (grid[di][i].count === 0) grid[di][i].type = it.type;
-        grid[di][i].count++;
+        if (grid[di][i].type === null) grid[di][i].type = it.type;
+        grid[di][i][it.table] = true;
       }
     });
     return grid;
