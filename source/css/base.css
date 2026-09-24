@@ -406,3 +406,50 @@ body { display: flex; flex-direction: column; height: 100vh; }
   .filter-bar input[type=search] { width: 100%; flex: 1 1 60%; max-width: none; }
   .filter-clear { margin-left: 0; flex: 1 1 auto; }
 }
+
+/* ===== [Day 13] 视图导航 + 三视图容器 + 总览网格 ===== */
+.content { flex: 1; min-height: 0; display: flex; position: relative; }
+.view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.view[hidden] { display: none !important; }
+
+/* 顶部视图导航条（Hash 路由） */
+.view-nav { display: flex; gap: 2px; padding: 0 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.view-nav a {
+  padding: 11px 16px; font-size: 13px; color: var(--ink-soft); text-decoration: none;
+  border-bottom: 2px solid transparent; transition: .15s;
+}
+.view-nav a:hover { color: var(--accent); }
+.view-nav a.active { color: var(--accent); font-weight: 600; border-bottom-color: var(--accent); }
+
+/* 总览视图 */
+#view-overview { padding: 18px; overflow: auto; }
+.ov-title { margin: 0 0 4px; font-size: 18px; }
+.ov-sub { margin: 0 0 18px; font-size: 13px; color: var(--ink-soft); }
+.ov-tables { display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }
+.ov-table { margin: 0; flex: 0 0 auto; border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--panel, #fff); }
+.ov-table h3 { margin: 0 0 8px; font-size: 14px; color: var(--ink); }
+.ov-grid { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; position: relative; }
+.ov-day { display: flex; flex-direction: column; gap: 2px; border-left: 1px dashed var(--line); padding-left: 3px; box-sizing: border-box; }
+.ov-day-head { height: 30px; font-size: 11px; color: var(--ink-soft); text-align: center; line-height: 1.25; margin: 0; box-sizing: border-box; border-bottom: 1px solid var(--line); }
+.ov-axis { display: flex; flex-direction: column; gap: 0; position: sticky; left: 0; z-index: 1; background: var(--panel, #fff); }
+.ov-axis-head { height: 30px; flex: 0 0 30px; box-sizing: border-box; }
+.ov-axis-cell { height: 22px; line-height: 22px; font-size: 10px; color: var(--ink-soft); text-align: right; padding-right: 5px; white-space: nowrap; flex: 0 0 22px; }
+.ov-slot { width: 13px; height: 9px; border-radius: 2px; background: var(--bg); border: 1px solid var(--line); box-sizing: border-box; }
+.ov-slot.filled { border-color: transparent; }
+
+/* 视图内返回 / 面包屑（余力：可访问导航） */
+.breadcrumb { padding: 8px 18px; font-size: 12px; color: var(--ink-soft); background: var(--panel); border-bottom: 1px solid var(--line); }
+.breadcrumb a { color: var(--accent); text-decoration: none; }
+.breadcrumb a:hover { text-decoration: underline; }
+
+/* 总表密度着色 + 整点辅助线 + 图例 */
+.ov-slot.light { opacity: 0.5; }
+.ov-slot.heavy { border: 2px solid #c0392b; box-shadow: 0 0 0 1px #c0392b; }
+.ov-hr { position: absolute; left: 0; height: 0; border-top: 1.5px dashed #aab2c0; pointer-events: none; z-index: 0; }
+.ov-legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 0 16px; font-size: 12px; color: var(--ink-soft); }
+.ov-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.ov-legend i { width: 14px; height: 11px; border-radius: 2px; display: inline-block; border: 1px solid var(--line); }
+.ov-legend .lg-empty { background: var(--bg); }
+.ov-legend .lg-light { background: #4a90d9; opacity: 0.5; }
+.ov-legend .lg-heavy { background: #4a90d9; border: 2px solid #c0392b; box-shadow: 0 0 0 1px #c0392b; }
+.ov-legend .lg-line { background: transparent; border-top: 1.5px dashed #aab2c0; height: 0; border-left: 0; border-right: 0; border-bottom: 0; }

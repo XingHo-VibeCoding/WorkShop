@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WorkShop 会议工作台</title>
   <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/animations.css">
 </head>
 <body>
   <!-- 上栏：应用标题 + 全局操作 -->
@@ -15,38 +16,124 @@
       <button id="btn-prev-week">‹ 上周</button>
       <button id="btn-next-week">下周 ›</button>
       <button id="btn-new" class="primary">+ 新建</button>
-      <button id="btn-settings" title="设置：自定义部门、标记、类型颜色、默认视图">设置</button>
+      <button id="btn-settings" title="打开设置：自定义部门、标记、类型颜色、默认视图、导入导出">设置</button>
       <button id="btn-import" title="导入日程（JSON）；图片/Excel 识别待第 3 周 OCR 接入">导入</button>
     </div>
   </header>
 
-  <!-- [Day 12] 筛选条：类型 + 关键词（纯前端过滤，不依赖后端） -->
-  <!-- frontend-guidelines §1: 属上栏下方、不另立主标题；§7: role=search + aria-label + 键盘可达 -->
-  <div class="filter-bar" role="search" aria-label="筛选时间线事项">
-    <label class="filter-field">
-      <span class="filter-label">类型</span>
-      <select id="filter-type" aria-label="按类型筛选事项">
-        <option value="all">全部</option>
-        <option value="meeting">会议</option>
-        <option value="trip">行程</option>
-        <option value="pending">待安排</option>
-        <option value="class">课表</option>
-        <option value="sport">运动</option>
-        <option value="life">生活</option>
-      </select>
-    </label>
-    <label class="filter-field">
-      <span class="filter-label">关键词</span>
-      <input id="filter-keyword" type="search" placeholder="搜索标题" aria-label="按关键词搜索事项标题">
-    </label>
-    <button id="filter-clear" class="filter-clear" aria-label="清空筛选条件，恢复全部事项">清空筛选</button>
-  </div>
+  <!-- [Day 13] 视图导航（Hash 路由）：时间线 / 总览 两个可独立访问视图，地址栏 #/timeline|#/overview -->
+  <nav class="view-nav" id="view-nav">
+    <a href="#/timeline" data-view="timeline">时间线</a>
+    <a href="#/overview" data-view="overview">总览</a>
+  </nav>
 
-  <!-- 主体：左时间线(主栏) / 右详情(侧栏) -->
-  <main class="layout">
-    <!-- 状态层：加载中 / 空 / 错误（覆盖主体，由 appState 控制显隐） -->
-    <div class="state-layer" id="state-layer" hidden>
-      <!-- 加载中 -->
+  <!-- 内容区：三个视图 + 全局状态层（loading / empty / error 覆盖其上） -->
+  <div class="content" id="content">
+
+    <!-- 视图 1：周时间线（核心，承载四状态） -->
+    <section id="view-timeline" class="view">
+      <!-- [Day 12] 筛选条：类型 + 关键词（纯前端过滤，不依赖后端） -->
+      <div class="filter-bar" role="search" aria-label="筛选时间线事项">
+        <label class="filter-field">
+          <span class="filter-label">类型</span>
+          <select id="filter-type" aria-label="按类型筛选事项">
+            <option value="all">全部</option>
+            <option value="meeting">会议</option>
+            <option value="trip">行程</option>
+            <option value="pending">待安排</option>
+            <option value="class">课表</option>
+            <option value="sport">运动</option>
+            <option value="life">生活</option>
+          </select>
+        </label>
+        <label class="filter-field">
+          <span class="filter-label">关键词</span>
+          <input id="filter-keyword" type="search" placeholder="搜索标题" aria-label="按关键词搜索事项标题">
+        </label>
+        <button id="filter-clear" class="filter-clear" aria-label="清空筛选条件，恢复全部事项">清空筛选</button>
+      </div>
+
+      <!-- 主体：左时间线(主栏) / 右详情(侧栏) -->
+      <main class="layout">
+        <section class="timeline" id="timeline" aria-label="周时间线">
+          <!-- 7 天分列由 JS 渲染 -->
+        </section>
+        <aside class="detail" id="detail">
+          <p class="detail-empty">点击时间线上的事项查看详情。</p>
+        </aside>
+      </main>
+
+      <!-- 页面底部：表签切换（仿 Excel） -->
+      <nav class="sheet-tabs" id="sheet-tabs">
+        <button data-mode="work" class="active">工作事项表</button>
+        <button data-mode="daily">日常事项表</button>
+        <button data-mode="all">总表</button>
+      </nav>
+    </section>
+
+    <!-- 设置弹窗（Day 9）：自定义部门 / 标记 / 类型颜色 / 默认视图 / 数据导入导出 -->
+    <div class="modal-overlay" id="settings-modal" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-label="设置">
+        <div class="modal-head">
+          <h2>设置</h2>
+          <button class="modal-close" id="btn-settings-close" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="set-hint">所有配置暂存于浏览器内存，刷新页面会重置；接入腾讯文档后自动改为云端保存（见 PRD §6）。</p>
+
+          <section class="set-section">
+            <h4>1 · 自定义部门与标记</h4>
+            <ul class="owner-list" id="owner-list"></ul>
+            <div class="owner-add">
+              <input id="new-owner-name" type="text" placeholder="部门名称" aria-label="新部门名称">
+              <input id="new-owner-mark" type="text" placeholder="符号" maxlength="2" style="width:56px" aria-label="新部门记号">
+              <button class="primary" id="btn-add-owner">+ 新增部门</button>
+            </div>
+            <div class="set-actions">
+              <button id="btn-export-owners">导出部门配置</button>
+              <button id="btn-import-owners">导入部门配置</button>
+              <input type="file" id="file-import-owners" accept="application/json" hidden>
+            </div>
+          </section>
+
+          <hr>
+
+          <section class="set-section">
+            <h4>2 · 类型颜色</h4>
+            <p class="set-hint">调整 6 个类型色；白字需 ≥4.5:1（低于会提示，防止调回不达标浅色）。</p>
+            <div id="color-list"></div>
+          </section>
+
+          <hr>
+
+          <section class="set-section">
+            <h4>3 · 通用</h4>
+            <label class="set-row">默认启动视图
+              <select id="set-default-view">
+                <option value="work">工作事项表</option>
+                <option value="daily">日常事项表</option>
+                <option value="all">总表</option>
+              </select>
+            </label>
+            <h4>日程数据（JSON 导入/导出）</h4>
+            <div class="set-actions">
+              <button id="btn-export-data">导出全部日程</button>
+              <button id="btn-import-data">导入日程</button>
+              <input type="file" id="file-import-data" accept="application/json" hidden>
+            </div>
+            <p class="set-hint">顶部「导入」按钮同样走 JSON；图片 / Excel 识别待第 3 周 OCR 接入。</p>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <!-- 视图 3：周总览 / 空闲时间（设想②，纯前端统计现有 items，半小时粒度） -->
+    <section id="view-overview" class="view" hidden>
+      <div id="overview-body"></div>
+    </section>
+
+    <!-- 全局状态层：loading / empty / error 覆盖三视图（四状态机） -->
+    <div class="state-layer" id="global-state" hidden>
       <div class="state-panel" data-state="loading">
         <div class="skeleton-grid">
           <div class="skeleton-col"></div><div class="skeleton-col"></div>
@@ -56,14 +143,12 @@
         </div>
         <p class="state-text">正在加载本周日程…</p>
       </div>
-      <!-- 空 -->
       <div class="state-panel" data-state="empty" hidden>
         <div class="state-icon">🗓️</div>
         <p class="state-title">本周还没有安排</p>
         <p class="state-text">点击「+ 新建」添加第一个事项；导入识别接入后可一键导入图片 / 表格。</p>
         <button class="btn-primary" id="btn-empty-new">+ 新建事项</button>
       </div>
-      <!-- 错误 -->
       <div class="state-panel" data-state="error" hidden>
         <div class="state-icon">⚠️</div>
         <p class="state-title">加载失败</p>
@@ -72,13 +157,7 @@
       </div>
     </div>
 
-    <section class="timeline" id="timeline" aria-label="周时间线">
-      <!-- 7 天分列由 JS 渲染 -->
-    </section>
-    <aside class="detail" id="detail">
-      <p class="detail-empty">点击时间线上的事项查看详情。</p>
-    </aside>
-  </main>
+  </div>
 
   <!-- 下栏：状态栏 -->
   <footer class="statusbar">
@@ -88,77 +167,6 @@
     <span id="stat-overlap">重叠：无</span>
     <span id="stat-sync">同步状态：本地内存（未接入腾讯文档）</span>
   </footer>
-
-  <!-- 页面底部：表签切换（仿 Excel） -->
-  <nav class="sheet-tabs" id="sheet-tabs">
-    <button data-mode="work" class="active">工作事项表</button>
-    <button data-mode="daily">日常事项表</button>
-    <button data-mode="all">总表</button>
-  </nav>
-
-  <!--
-    【Day 8 预留挂载点（不实装，详见 PRD.md §6 后续设想）】
-    - 反馈栏（设想①）：接口实装后挂载，反馈数据写入腾讯文档（依赖第 3 周 API / 阶段二后端代理）。
-      <div id="feedback-bar" class="feedback-bar"></div>
-    - 空闲时间总览（设想②）：每个表一个、独立、半小时粒度；导出与 AI 精细化网格为后续。
-      <section id="free-time-overview" class="free-time"></section>
-  -->
-
-  <!-- 设置弹窗（Day 9）：自定义部门 / 标记 / 类型颜色 / 默认视图 / 数据导入导出 -->
-  <div class="modal-overlay" id="settings-modal" hidden>
-    <div class="modal" role="dialog" aria-modal="true" aria-label="设置">
-      <div class="modal-head">
-        <h2>设置</h2>
-        <button class="modal-close" id="btn-settings-close" title="关闭" aria-label="关闭">×</button>
-      </div>
-      <div class="modal-body">
-        <p class="set-hint">所有配置暂存于浏览器内存，刷新页面会重置；接入腾讯文档后自动改为云端保存（见 PRD §6）。</p>
-
-        <section class="set-section">
-          <h4>1 · 自定义部门与标记</h4>
-          <ul class="owner-list" id="owner-list"></ul>
-          <div class="owner-add">
-            <input id="new-owner-name" type="text" placeholder="部门名称" aria-label="新部门名称">
-            <input id="new-owner-mark" type="text" placeholder="符号" maxlength="2" style="width:56px" aria-label="新部门记号">
-            <button class="primary" id="btn-add-owner">+ 新增部门</button>
-          </div>
-          <div class="set-actions">
-            <button id="btn-export-owners">导出部门配置</button>
-            <button id="btn-import-owners">导入部门配置</button>
-            <input type="file" id="file-import-owners" accept="application/json" hidden>
-          </div>
-        </section>
-
-        <hr>
-
-        <section class="set-section">
-          <h4>2 · 类型颜色</h4>
-          <p class="set-hint">调整 6 个类型色；白字需 ≥4.5:1（低于会提示，防止调回不达标浅色）。</p>
-          <div id="color-list"></div>
-        </section>
-
-        <hr>
-
-        <section class="set-section">
-          <h4>3 · 通用</h4>
-          <label class="set-row">默认启动视图
-            <select id="set-default-view">
-              <option value="work">工作事项表</option>
-              <option value="daily">日常事项表</option>
-              <option value="all">总表</option>
-            </select>
-          </label>
-          <h4>日程数据（JSON 导入/导出）</h4>
-          <div class="set-actions">
-            <button id="btn-export-data">导出全部日程</button>
-            <button id="btn-import-data">导入日程</button>
-            <input type="file" id="file-import-data" accept="application/json" hidden>
-          </div>
-          <p class="set-hint">顶部「导入」按钮同样走 JSON；图片 / Excel 识别待第 3 周 OCR 接入。</p>
-        </section>
-      </div>
-    </div>
-  </div>
 
   <!-- 删除确认弹窗（Day 11）：复用设置弹窗模板，主版 / PreText 版共用同一份 DOM -->
   <div class="modal-overlay" id="delete-modal" hidden>
@@ -174,5 +182,7 @@
   </div>
 
   <script src="js/timeline.js"></script>
+  <script src="js/router.js"></script>
+  <script src="js/animations.js"></script>
 </body>
 </html>

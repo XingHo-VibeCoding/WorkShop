@@ -64,30 +64,38 @@ function esc(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// ---- 四状态机 ----
+// ---- 四状态机（全局，覆盖三视图）----
 const appState = { value: 'loading', error: null };
+let currentView = 'timeline';   // [Day 13] 当前视图：timeline | overview（设置仍是弹窗，不走路由）
 
-function setMainVisible(v) {
-  document.getElementById('timeline').hidden = !v;
-  document.getElementById('detail').hidden = !v;
+function showGlobalState(which) {
+  const gs = document.getElementById('global-state');
+  if (!gs) return;
+  gs.hidden = !which;
+  gs.querySelectorAll('.state-panel').forEach(p => { p.hidden = (p.dataset.state !== which); });
 }
-function showStateLayer(which) {
-  const layer = document.getElementById('state-layer');
-  layer.hidden = !which;
-  layer.querySelectorAll('.state-panel').forEach(p => { p.hidden = (p.dataset.state !== which); });
+function showViews() {
+  document.getElementById('view-timeline').hidden = currentView !== 'timeline';
+  document.getElementById('view-overview').hidden = currentView !== 'overview';
 }
 function setState(s, msg) {
   appState.value = s;
+  const hideAll = () => {
+    document.getElementById('view-timeline').hidden = true;
+    document.getElementById('view-overview').hidden = true;
+  };
   if (s === 'loading' || s === 'error') {
-    setMainVisible(false);
-    showStateLayer(s);
-    if (s === 'error') document.getElementById('error-msg').textContent = msg || '日程数据加载出错，请重试。';
-  } else { // success | empty
-    setMainVisible(true);
-    showStateLayer(null);
+    hideAll();
+    showGlobalState(s);
+    if (s === 'error') { const em = document.getElementById('error-msg'); if (em) em.textContent = msg || '日程数据加载出错，请重试。'; }
+  } else if (s === 'empty') {
+    if (currentView === 'timeline') { hideAll(); showGlobalState('empty'); }
+    else { showGlobalState(null); showViews(); renderCurrentView(); }
+  } else { // success
+    showGlobalState(null); showViews(); renderCurrentView();
   }
-  document.getElementById('stat-sync').textContent = '同步状态：本地内存（未接入腾讯文档）';
-  document.getElementById('stat-sync').dataset.state = s;
+  const sync = document.getElementById('stat-sync');
+  if (sync) { sync.textContent = '同步状态：本地内存（未接入腾讯文档）'; sync.dataset.state = s; }
 }
 
 // ---- 数据层：异步加载（mock 返回 Promise，预留真实 API 接缝）----
