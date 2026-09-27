@@ -1,0 +1,7 @@
+{
+  "name": "health",
+  "version": "1.0.0",
+  "description": "WorkShop health check cloud function (Day 15)",
+  "main": "index.js",
+  "dependencies": {}
+}
