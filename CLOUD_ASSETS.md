@@ -46,23 +46,23 @@
 
 ---
 
-## 三、WorkBuddy 托管部署（绕路产物 · 建议下线）
+## 三、WorkBuddy 托管部署（绕路产物 · 已于 2026-09-27 下线）
 
-> ⚠️ **已不再是线上正解**。这是早期为"立刻拿到公网地址过验收"走的绕路通道（底层腾讯云 CloudBase 技术栈、WorkBuddy 接管），**无用户可掌控的持久数据库**，不能承接 Day 16+ 真实后端。用户已在上方「二」用 CloudBase 控制台完成真实部署，建议**下线**此份以免混淆"线上到底跑哪份"。
+> ⚠️ **已不再是线上正解、且已下线**。这是早期为"立刻拿到公网地址过验收"走的绕路通道（底层腾讯云 CloudBase 技术栈、WorkBuddy 接管），**无用户可掌控的持久数据库**，不能承接 Day 16+ 真实后端。用户已在上方「二」用 CloudBase 控制台完成真实部署；本绕路份于 2026-09-27 经用户确认 `unpublish`，原分享链接 `https://workshop-meeting-board.app.workbuddy.host/` 已失效。保留仅作历史记录。
 
 | 字段 | 值 | 为什么记 / 有什么用 |
 |---|---|---|
-| 前端公网地址 | `https://workshop-meeting-board.app.workbuddy.host/` | 历史绕路入口；建议下线。 |
-| 健康检查地址 | `https://workshop-meeting-board.app.workbuddy.host/api/health` | 同上。 |
+| 前端公网地址 | ~~`https://workshop-meeting-board.app.workbuddy.host/`~~（已下线失效） | 历史绕路入口；2026-09-27 下线。 |
+| 健康检查地址 | ~~`https://workshop-meeting-board.app.workbuddy.host/api/health`~~（已下线失效） | 同上。 |
 | 部署形态 | 单 Node 服务（`source/server.js`，监听 `$PORT`、绑定 0.0.0.0） | 静态前端 + `/api/health` 同域。 |
-| 管理入口 | WorkBuddy 内「设置 — 数据管理 — 应用」 | 用于下线 / 重新发布。 |
+| 管理入口 | WorkBuddy 内「设置 — 数据管理 — 应用」 | 已下线。 |
 | 承载平台 | WorkBuddy 托管云服务（非独立腾讯云控制台环境） | 区分用途：仅历史残留。 |
 
-**用途总结**：历史记录，提醒"此份非正解、可下线"。
+**用途总结**：历史记录，提醒"此份非正解、已下线"。
 
 ---
 
-## 三、腾讯云轻量应用服务器 Lighthouse（独立资产 · 非 CloudBase · 预留其他业务）
+## 四、腾讯云轻量应用服务器 Lighthouse（独立资产 · 非 CloudBase · 预留其他业务）
 
 > ⚠️ 再次强调：这是独立服务器，**不是 CloudBase**，与 WorkShop 当前部署无关，预留给其他业务。以下「待填」项需你补全（不含密钥明文）。
 
