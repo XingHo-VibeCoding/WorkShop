@@ -21,3 +21,6 @@ resource/before_demo/
 resource/logs/
 resource/data/
 resource/text/
+
+# WorkBuddy 会话产物（.genie 会话文件），不进仓库
+.wbapp_*.genie

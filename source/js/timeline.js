@@ -4,6 +4,26 @@
 
 const WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
 
+// [Day 14] 重叠分栏布局：时间纵向定位 + 横向分栏（lane/stacking）常量与工具
+const DAY_START_HOUR = 7, DAY_END_HOUR = 22, HOUR_PX = 52; // 列高 = (22-7)*52 = 780px
+const DAY_START_MIN = DAY_START_HOUR * 60;
+const MIN_ITEM_PX = 52; // 卡片最小高度：标记+标题+时间 三行（备注已移入 hover/focus 浮窗，不挤占卡片）
+function toMin(hhmm) { const [h, m] = String(hhmm || '0:0').split(':').map(Number); return (h || 0) * 60 + (m || 0); }
+/* 贪心分配 lane：按 start 顺序给每个事项找第一个空闲 lane（结束时间≤当前 start），
+   否则新开 lane。返回 id→laneIndex 与总 lane 数；并发 N 个重叠项即 N 列。 */
+function assignLanes(sorted) {
+  const laneEnds = []; const map = new Map(); let laneCount = 0;
+  sorted.forEach(it => {
+    const s = toMin(it.startTime), e = toMin(it.endTime);
+    let placed = -1;
+    for (let i = 0; i < laneEnds.length; i++) { if (laneEnds[i] <= s) { placed = i; break; } }
+    if (placed < 0) { placed = laneEnds.length; laneEnds.push(e); } else { laneEnds[placed] = e; }
+    laneCount = Math.max(laneCount, placed + 1);
+    map.set(it.id, placed);
+  });
+  return { map, laneCount };
+}
+
 /* 记号 = 部门 / 人物（是否私人）。颜色 = 日程类型。
    用户 2026-09-20：记号只做部门与人物区分（私人），不表示类型；类型用颜色区分。
    后续多用户：每人各自记号；avatarUrl 可来自导入图片或腾讯文档/会议默认头像。 */
@@ -174,19 +194,113 @@ function renderItemText(item) { return item.title; }
    renderItemCard：单一事项卡片，时间线 / 详情共用同一渲染源，消除重复拼接。
    后续 PreText 对照组件将复用此组件 + renderItemText 接缝。 */
 function renderItemCard(item, opts = {}) {
-  const { showMark = false, warn = null } = opts;
+  const { showMark = false, warn = null, onClick = null } = opts;
   const m = markOf(item);
   const el = document.createElement('div');
   el.className = `item type-${item.type}`;
   el.dataset.id = item.id;
-  // [预留] 拖动式删除/转移：后续给 el 加 draggable + drop 事件即可，调用方无需改动
+  el.tabIndex = 0; // 可聚焦：键盘 Tab 到卡片即显示备注浮窗（聚焦即生效）
+  // 排版：标记+标题 同行 → 时间 一行（备注移入 hover/focus 浮窗，不再挤占最矮卡片高度）
   el.innerHTML =
-    (showMark ? markHTML(m) : '') +
-    `<span class="item-time">${item.startTime}–${item.endTime}</span>` +
+    (showMark ? `<span class="item-mark" title="${esc(m.name)}">${esc(m.symbol)}</span>` : '') +
     `<span class="item-title">${esc(renderItemText(item))}</span>` +
+    `<span class="item-time">${item.startTime}–${item.endTime}</span>` +
     (warn ? `<span class="item-warn" title="${esc(warn.title)}">⚠</span>` : '');
-  el.addEventListener('click', () => showDetail(item));
+  el.addEventListener('click', onClick || (() => showDetail(item)));
+  // 备注浮窗：桌面端 hover/聚焦即显示完整备注；移动端触摸无 hover，改为「点卡片→底部抽屉看备注」，故内部判 isMobile 屏蔽浮窗
+  el.addEventListener('mouseenter', () => { if (!isMobile()) showNote(item, el); });
+  el.addEventListener('mouseleave', () => { if (!isMobile()) scheduleNoteHide(); });
+  el.addEventListener('focusin', () => { if (!isMobile()) showNote(item, el); });
+  el.addEventListener('focusout', () => { if (!isMobile()) scheduleNoteHide(); });
   return el;
+}
+
+// ============ [Day 14] 备注浮窗：hover/focus 即生效，尺寸随字数自动调节 ============
+// 宽度：按字数自适应（width = clamp(BASE_W + n*PER_CHAR, MIN_W, MAX_W)），不改变。
+// 高度：下限 = 2 × 时间表最小单元高度(MIN_ITEM_PX)；内容超过上限时显示滚动条，不随字数无限增高。
+let _notePop = null;
+let _noteHideTimer = null;
+let _noteCurrent = null;
+function ensureNotePop() {
+  if (_notePop) return _notePop;
+  const el = document.createElement('div');
+  el.id = 'note-pop';
+  el.hidden = true;
+  el.setAttribute('role', 'tooltip');
+  document.body.appendChild(el);
+  // 鼠标移入浮窗：保持显示（便于滚动看完整备注），移出才延迟隐藏
+  el.addEventListener('mouseenter', cancelNoteHide);
+  el.addEventListener('mouseleave', scheduleNoteHide);
+  _notePop = el;
+  return _notePop;
+}
+function notePopMetrics(text) {
+  const n = (text || '').trim().length;
+  const MIN_W = 160, BASE_W = 200, MAX_W = 360, PER_CHAR = 7;
+  const width = Math.min(MAX_W, Math.max(MIN_W, BASE_W + n * PER_CHAR));
+  // 高度：下限 = 2 × 时间表最小单元高度(MIN_ITEM_PX)，超出上限则滚动条；宽度保持按字数自适应不变
+  const CHAR_W = 13, LINE_H = 18, PAD = 16;
+  const NOTE_FLOOR = 2 * MIN_ITEM_PX;   // 下限：2 × 时间表最小单元高度（=104px）
+  const NOTE_CAP = NOTE_FLOOR + 176;    // 上限，超出则滚动
+  const charsPerLine = Math.max(1, Math.floor((width - 16) / CHAR_W));
+  const rows = Math.max(1, Math.ceil(n / charsPerLine));
+  const height = Math.min(NOTE_CAP, Math.max(NOTE_FLOOR, rows * LINE_H + PAD));
+  return { width, height };
+}
+// 浮窗尽量贴在卡片旁边：优先右侧，放不下则左侧，再不行上下；长备注滚动条也贴着卡片，便于看完整
+function showNote(item, cardEl) {
+  const note = (item.note || '').trim();
+  if (!note) return;
+  ensureNotePop();
+  _noteCurrent = { item, cardEl };
+  const pop = _notePop;
+  const m = notePopMetrics(note);
+  pop.textContent = note;
+  pop.style.width = m.width + 'px';        // 宽度：按字数自适应，不改
+  pop.style.height = m.height + 'px';      // 高度：下限=2×单元高，超出上限滚动
+  pop.style.overflowY = 'auto';
+  pop.hidden = false;
+  cancelNoteHide();
+  positionNoteBeside(cardEl, m);
+}
+function positionNoteBeside(cardEl, m) {
+  const pop = _notePop;
+  const r = cardEl.getBoundingClientRect();
+  const gap = 8, vw = window.innerWidth, vh = window.innerHeight;
+  let left = r.right + gap;                       // 优先右侧
+  if (left + m.width > vw - 8) left = r.left - m.width - gap;  // 放不下则左侧
+  if (left < 8) left = Math.max(8, Math.min(vw - m.width - 8, r.left)); // 都没有则居中收边
+  let top = r.top;                               // 与卡片顶对齐
+  top = Math.max(8, Math.min(vh - m.height - 8, top));
+  pop.style.left = left + 'px';
+  pop.style.top = top + 'px';
+}
+function cancelNoteHide() { if (_noteHideTimer) { clearTimeout(_noteHideTimer); _noteHideTimer = null; } }
+function scheduleNoteHide() { cancelNoteHide(); _noteHideTimer = setTimeout(hideNote, 200); }
+function hideNote() {
+  if (_noteHideTimer) { clearTimeout(_noteHideTimer); _noteHideTimer = null; }
+  if (_notePop) _notePop.hidden = true;
+  _noteCurrent = null;
+}
+
+// ============ [Day 14] 保存成功提示（toast）============
+let _toast = null;
+function showToast(msg) {
+  if (!_toast) {
+    const el = document.createElement('div');
+    el.id = 'toast';
+    el.setAttribute('role', 'status');
+    el.setAttribute('aria-live', 'polite');
+    document.body.appendChild(el);
+    _toast = el;
+  }
+  _toast.textContent = msg;
+  _toast.hidden = false;
+  _toast.classList.remove('show');
+  void _toast.offsetWidth; // 重播动画
+  _toast.classList.add('show');
+  clearTimeout(_toast._t);
+  _toast._t = setTimeout(() => _toast.classList.remove('show'), 1800);
 }
 
 /* 重叠检测：按天分组，时间点相交即重叠（"HH:mm" 同格式可字典序比较） */
@@ -249,6 +363,204 @@ function legendHTML() {
   </div>`;
 }
 
+// ============ [Day 14] 重叠折叠 + 展开弹窗 ============
+// 把一组按开始时间排序的事项，按「时间互相交叠」聚成连通分量（冲突组）。
+// 锚点 = 组内时长最长者（并列取最早开始），代表该组在周时间线上渲染的那一张卡。
+function buildGroups(items) {
+  const sorted = [...items].sort((a, b) =>
+    a.startTime.localeCompare(b.startTime) || a.endTime.localeCompare(b.endTime));
+  const used = new Set();
+  const groups = [];
+  sorted.forEach(it => {
+    if (used.has(it.id)) return;
+    const group = [it]; used.add(it.id);
+    let maxEnd = it.endTime, minStart = it.startTime, changed = true;
+    while (changed) {
+      changed = false;
+      for (const o of sorted) {
+        if (used.has(o.id)) continue;
+        const oS = toMin(o.startTime), oE = toMin(o.endTime);
+        const gS = toMin(minStart), gE = toMin(maxEnd);
+        if (oS < gE && oE > gS) { // 与该组整体时间窗相交
+          group.push(o); used.add(o.id);
+          if (oE > toMin(maxEnd)) maxEnd = o.endTime;
+          if (oS < toMin(minStart)) minStart = o.startTime;
+          changed = true;
+        }
+      }
+    }
+    // 锚点 = 时长最长（并列取最早开始）
+    group.sort((a, b) =>
+      (toMin(b.endTime) - toMin(b.startTime)) - (toMin(a.endTime) - toMin(a.startTime))
+      || a.startTime.localeCompare(b.startTime));
+    groups.push({ items: group, anchor: group[0], startMin: toMin(minStart), endMin: toMin(maxEnd) });
+  });
+  return groups;
+}
+
+// 重叠展开弹窗：覆盖时间线可视区（右侧栏保持可点），组内各日程按时间水平铺开（lane 分行）。
+let _overlapPop = null;     // { root, backdrop, panel, track, title }
+let _overlapCurrent = null; // 当前打开的 group
+
+function ensureOverlapPop() {
+  if (_overlapPop) return _overlapPop;
+  const root = document.createElement('div');
+  root.id = 'overlap-pop';
+  root.hidden = true;
+  root.innerHTML =
+    `<div class="overlap-backdrop" id="overlap-backdrop"></div>` +
+    `<div class="overlap-panel" role="dialog" aria-label="重叠日程展开">` +
+      `<div class="overlap-head">` +
+        `<span class="overlap-title" id="overlap-title"></span>` +
+        `<button class="overlap-close" id="overlap-close" aria-label="关闭">×</button>` +
+      `</div>` +
+      `<div class="overlap-track" id="overlap-track"></div>` +
+      `<p class="overlap-hint">按时间在此铺开（重叠项左右分栏）· 新增/删除后本界面自动刷新 · 点卡片看右侧详情</p>` +
+    `</div>`;
+  document.body.appendChild(root);
+  const backdrop = root.querySelector('#overlap-backdrop');
+  const track = root.querySelector('#overlap-track');
+  const title = root.querySelector('#overlap-title');
+  backdrop.addEventListener('click', closeOverlapModal);
+  root.querySelector('#overlap-close').addEventListener('click', closeOverlapModal);
+  root._keyHandler = (e) => { if (e.key === 'Escape') { e.preventDefault(); closeOverlapModal(); } };
+  document.addEventListener('keydown', root._keyHandler);
+  _overlapPop = { root, backdrop, panel: root.querySelector('.overlap-panel'), track, title };
+  return _overlapPop;
+}
+
+function openOverlapModal(group, ovSets) {
+  const pop = ensureOverlapPop();
+  _overlapCurrent = group;
+  // 仅覆盖时间线可视区：固定定位到 .timeline 的屏幕矩形，右侧栏(兄弟节点)保持可点
+  const tl = document.getElementById('timeline');
+  const r = tl.getBoundingClientRect();
+  pop.root.style.left = r.left + 'px';
+  pop.root.style.top = r.top + 'px';
+  pop.root.style.width = r.width + 'px';
+  pop.root.style.height = r.height + 'px';
+  pop.title.textContent = `${group.items.length} 个日程重叠`;
+  renderOverlapTrack(group, pop.track, ovSets);
+  pop.root.hidden = false;
+  pop.root.classList.remove('is-open');
+  void pop.root.offsetWidth; // 强制 reflow，重播入场动画
+  pop.root.classList.add('is-open');
+  fitOverlapText(pop.track);
+  fitOverlapHeight(pop.track); // [Day14] PreText 真实测量卡片内容，校正弹窗高度与滚动阈值
+}
+
+// 弹窗内：迷你时间轴——按起止时间纵向定位、重叠项左右分栏(lane)，每张卡仍是竖排三行，与主表一致
+function renderOverlapTrack(group, track, ovSets) {
+  const { items, startMin, endMin } = group;
+  const span = Math.max(1, endMin - startMin);
+  const sorted = [...items].sort((a, b) =>
+    a.startTime.localeCompare(b.startTime) || a.endTime.localeCompare(b.endTime));
+  const { map: laneMap, laneCount } = assignLanes(sorted);
+  const laneW = laneCount > 0 ? 100 / laneCount : 100;
+  const trackH = Math.max(5 * MIN_ITEM_PX, (span / 60) * HOUR_PX); // 下限=5×最小单元高(260px)；自然高度按跨距纵向铺开，容纳全部重叠事项
+  // 时间刻度：每小时一条线 + 标签
+  const h0 = Math.floor(startMin / 60), h1 = Math.ceil(endMin / 60);
+  let axis = '';
+  for (let h = h0; h <= h1; h++) {
+    const y = ((h * 60 - startMin) / span) * trackH;
+    axis += `<div class="ot-hour" style="top:${y}px"><span>${String(h).padStart(2, '0')}:00</span></div>`;
+  }
+  track.style.position = 'relative';
+  track.style.height = trackH + 'px';
+  track.style.maxHeight = (6 * MIN_ITEM_PX) + 'px'; // ≈312px：超过约6个时间表最小单元高度才启用滚动条
+  track.style.overflowY = 'auto';
+  track.innerHTML = `<div class="ot-axis">${axis}</div>`;
+  sorted.forEach(it => {
+    const lane = laneMap.has(it.id) ? laneMap.get(it.id) : 0;
+    const s = toMin(it.startTime), e = toMin(it.endTime);
+    const top = ((s - startMin) / span) * trackH;
+    const h = Math.max((e - s) / 60 * HOUR_PX, MIN_ITEM_PX);
+    let ovClass = '';
+    if (ovSets) {
+      if (ovSets.crossOverlap.has(it.id)) ovClass = 'overlap-cross';
+      else if (ovSets.workOverlap.has(it.id)) ovClass = 'overlap-work';
+      else if (ovSets.dailyOverlap.has(it.id)) ovClass = 'overlap-daily';
+    }
+    const warnTitle = ovClass === 'overlap-cross' ? '跨表冲突：工作与日常时间重叠'
+      : ovClass === 'overlap-work' ? '工作冲突：时间重叠'
+      : ovClass === 'overlap-daily' ? '日常提醒：时间重叠（允许重叠）' : null;
+    const card = renderItemCard(it, {
+      showMark: currentMode === 'all',
+      warn: ovClass ? { title: warnTitle } : null,
+      onClick: () => {
+        showDetail(it);
+        track.querySelectorAll('.ot-card').forEach(c => c.classList.remove('selected'));
+        card.classList.add('selected');
+      }
+    });
+    card.classList.add('ot-card');
+    if (ovClass) card.classList.add(ovClass);
+    card.style.position = 'absolute';
+    card.style.top = top + 'px';
+    card.style.height = h + 'px';
+    card.style.left = `calc(${lane * laneW}% + 2px)`;
+    card.style.width = `calc(${laneW}% - 4px)`;
+    track.appendChild(card);
+  });
+}
+
+function closeOverlapModal() {
+  if (!_overlapPop || _overlapPop.root.hidden) return;
+  _overlapPop.root.classList.remove('is-open');
+  _overlapPop.root.hidden = true;
+  _overlapCurrent = null;
+}
+
+// 实时刷新：数据变更（增/删/改）后，若重叠弹窗开着，按当前数据重建弹窗内容
+function currentViewModel() {
+  const monday = mondayOf(currentOffset), sunday = addDays(monday, 6);
+  const candidates = items.filter(it => it.start >= monday && it.start <= sunday);
+  const view = currentMode === 'all' ? candidates : candidates.filter(it => it.table === currentMode);
+  const filtered = applyFilter(view);
+  const workItems = candidates.filter(it => it.table === 'work');
+  const dailyItems = candidates.filter(it => it.table === 'daily');
+  const workOverlap = findOverlaps(workItems);
+  const dailyOverlap = findOverlaps(dailyItems);
+  const crossOverlap = findCrossOverlaps(workItems, dailyItems);
+  return { candidates, filtered, workOverlap, dailyOverlap, crossOverlap };
+}
+function refreshOverlapModal() {
+  if (!_overlapPop || _overlapPop.root.hidden || !_overlapCurrent) return;
+  const { filtered, workOverlap, dailyOverlap, crossOverlap } = currentViewModel();
+  const anchorId = _overlapCurrent.anchor.id;
+  const dayTime = _overlapCurrent.anchor.start.getTime();
+  const dayItems = filtered.filter(it => it.start.getTime() === dayTime);
+  const groups = buildGroups(dayItems);
+  const same = groups.find(g => g.items.some(it => it.id === anchorId));
+  if (!same || same.items.length <= 1) { closeOverlapModal(); return; } // 重叠已消解
+  _overlapCurrent = same;
+  _overlapPop.title.textContent = `${same.items.length} 个日程重叠`;
+  renderOverlapTrack(same, _overlapPop.track, { workOverlap, dailyOverlap, crossOverlap });
+  fitOverlapText(_overlapPop.track);
+}
+
+// PreText 适配弹窗内卡片标题：超宽则缩字号（真实字形测量、零 reflow），不可达自动降级 CSS
+async function fitOverlapText(track) {
+  const mod = await ensurePretext();
+  if (!mod) return;
+  const w = Math.max(80, track.clientWidth - 40);
+  track.querySelectorAll('.item-title').forEach(el => {
+    const text = el.textContent;
+    let size = 13;
+    try {
+      const font = '600 13px "PingFang SC","Microsoft YaHei",sans-serif';
+      const prep = mod.prepare(text, font, { whiteSpace: 'normal', wordBreak: 'break-word' });
+      while (size > 10) {
+        const laid = mod.layout(prep, w, size + 5);
+        if (laid.lineCount <= 1) break;
+        size -= 1;
+      }
+      el.style.fontSize = size + 'px';
+      el.style.lineHeight = (size + 5) + 'px';
+    } catch (e) { /* 保持 CSS 默认 */ }
+  });
+}
+
 function render() {
   const monday = mondayOf(currentOffset);
   const sunday = addDays(monday, 6);
@@ -280,25 +592,55 @@ function render() {
 
     const body = document.createElement('div');
     body.className = 'day-body';
-    filtered.filter(it => it.start.getTime() === dayDate.getTime())
-      .sort((a, b) => a.startTime.localeCompare(b.startTime) || a.endTime.localeCompare(b.endTime))
-      .forEach(it => {
-        const ovCross = crossOverlap.has(it.id);
-        const ovWork = workOverlap.has(it.id);
-        const ovDaily = dailyOverlap.has(it.id);
-        let ovClass = '', ovTitle = '';
-        if (ovCross) { ovClass = 'overlap-cross'; ovTitle = '跨表冲突：工作与日常时间重叠'; }
-        else if (ovWork) { ovClass = 'overlap-work'; ovTitle = '工作冲突：时间重叠'; }
-        else if (ovDaily) { ovClass = 'overlap-daily'; ovTitle = '日常提醒：时间重叠（允许重叠）'; }
-        const hasOv = ovClass !== '';
-        // 复用可复用卡片组件 renderItemCard（余力加练 Day 8）
-        const card = renderItemCard(it, {
-          showMark: currentMode === 'all',
-          warn: hasOv ? { title: ovTitle } : null,
-        });
-        if (hasOv) card.classList.add(ovClass);
-        body.appendChild(card);
+    const dayItems = filtered.filter(it => it.start.getTime() === dayDate.getTime())
+      .sort((a, b) => a.startTime.localeCompare(b.startTime) || a.endTime.localeCompare(b.endTime));
+    // [Day 14] 重叠折叠：同天事项按时间交叠聚成冲突组，每组只渲染最长那张作锚点卡，
+    // 其余成员在周时间线隐藏；组内有多个日程时，锚点卡上方贴半透明角标（重叠数 + 各成员记号）。
+    // 点击锚点卡或角标 → 弹窗水平铺开（详见 buildGroups / openOverlapModal）。
+    const groups = buildGroups(dayItems);
+    groups.forEach(group => {
+      const it = group.anchor;
+      const s = toMin(it.startTime), e = toMin(it.endTime);
+      const top = (s - DAY_START_MIN) / 60 * HOUR_PX;
+      const h = Math.max((e - s) / 60 * HOUR_PX, MIN_ITEM_PX);
+      const ovCross = crossOverlap.has(it.id);
+      const ovWork = workOverlap.has(it.id);
+      const ovDaily = dailyOverlap.has(it.id);
+      let ovClass = '', ovTitle = '';
+      if (ovCross) { ovClass = 'overlap-cross'; ovTitle = '跨表冲突：工作与日常时间重叠'; }
+      else if (ovWork) { ovClass = 'overlap-work'; ovTitle = '工作冲突：时间重叠'; }
+      else if (ovDaily) { ovClass = 'overlap-daily'; ovTitle = '日常提醒：时间重叠（允许重叠）'; }
+      const hasOv = ovClass !== '';
+      // 锚点卡占满整列宽度（其余成员已折叠进弹窗）
+      const card = renderItemCard(it, {
+        showMark: currentMode === 'all',
+        warn: hasOv ? { title: ovTitle } : null,
+        onClick: group.items.length > 1 ? () => openOverlapModal(group, { workOverlap, dailyOverlap, crossOverlap }) : null,
       });
+      if (hasOv) card.classList.add(ovClass);
+      card.style.position = 'absolute';
+      card.style.top = top + 'px';
+      card.style.height = h + 'px';
+      card.style.left = '4px';
+      card.style.right = '4px';
+      card.style.width = 'auto';
+      body.appendChild(card);
+
+      // 角标：组内有多个日程才显示（紧贴锚点卡上方）
+      if (group.items.length > 1) {
+        const badge = document.createElement('div');
+        badge.className = 'overlap-badge' + (hasOv ? ' ' + ovClass : '');
+        const labels = group.items.map(g => {
+          const gm = markOf(g);
+          return `<span class="ob-label" title="${esc(gm.name)}">${esc(gm.symbol)}</span>`;
+        }).join('');
+        badge.innerHTML = `<span class="ob-count">${group.items.length} 个日程重叠</span><span class="ob-labels">${labels}</span>`;
+        const badgeTop = Math.max(top - 24, 0);
+        badge.style.top = badgeTop + 'px';
+        badge.addEventListener('click', (ev) => { ev.stopPropagation(); openOverlapModal(group, { workOverlap, dailyOverlap, crossOverlap }); });
+        body.appendChild(badge);
+      }
+    });
     col.appendChild(body);
     timeline.appendChild(col);
   }
@@ -345,6 +687,7 @@ function showDetail(item) {
   const d = document.getElementById('detail');
   if (!item) {
     d.innerHTML = `<p class="detail-empty">点击时间线上的事项查看详情，或点「+ 新建」添加。底部可切换工作/日常/总表。</p>${legendHTML()}`;
+    closeDetailDrawer();
     return;
   }
   const m = markOf(item);
@@ -363,7 +706,7 @@ function showDetail(item) {
       <p class="row"><b>时间</b>${fmtMD(item.start)} ${item.startTime}–${item.endTime}</p>
       <p class="row"><b>参与人</b>${esc(item.attendees)}</p>
       <p class="row"><b>场地</b>${esc(item.venue)}</p>
-      <p class="row"><b>备注</b>${esc(item.note)}</p>
+      <p class="row"><b>备注</b>${item.note ? esc(item.note) : '<span style="color:var(--ink-soft)">—</span>'}</p>
       <div class="form-actions">
         <button class="btn-edit" id="btn-edit">编辑</button>
         <button class="btn-delete" id="btn-delete">删除此事项</button>
@@ -452,9 +795,12 @@ function saveItem(existing) {
     start,
     ownerKey: table === 'work' ? fd.get('ownerKey') : 'me',
   };
-  if (existing) Object.assign(existing, data);
-  else items.push(Object.assign({ id: 'u' + Date.now() }, data));
+  let saved;
+  if (existing) { Object.assign(existing, data); saved = existing; }
+  else { saved = Object.assign({ id: 'u' + Date.now() }, data); items.push(saved); }
+  showDetail(saved);   // 保存后右侧栏立即回显最新内容（修复表单残留）
   afterMutation();
+  showToast('已保存');  // 状态提醒：备注/字段修改已落盘
 }
 
 // ---- 删除确认弹窗（Day 11）：页面内状态机，替代原生 confirm() ----
@@ -613,6 +959,7 @@ async function renderModalText(body, item) {
 // 变更后刷新：重渲染并根据本周是否还有事项切换 success / empty
 function afterMutation(backToEmpty) {
   render();
+  refreshOverlapModal(); // [Day 14] 重叠弹窗开着时同步刷新
   const monday = mondayOf(currentOffset), sunday = addDays(monday, 6);
   const hasWeek = items.some(it => it.start >= monday && it.start <= sunday);
   setState(hasWeek ? 'success' : 'empty');
