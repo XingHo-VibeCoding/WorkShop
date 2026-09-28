@@ -1,0 +1,7 @@
+{
+  "name": "workshop-items",
+  "version": "1.0.0",
+  "description": "WorkShop GET /api/items 事项读取云函数（Day 17）· 零依赖直打 PostgREST",
+  "main": "index.js",
+  "dependencies": {}
+}

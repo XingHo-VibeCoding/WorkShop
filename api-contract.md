@@ -2,7 +2,7 @@
 
 > **定位**：本文档是第 3 周（Day 16–20）「建表 + 写接口」的**唯一依据**。
 > **当前状态**：除 `/api/health` 已在 Day 15 实现外，其余接口今日**只登记占位、不实现**。
-> **约定**：所有时间一律 `YYYY-MM-DD HH:mm`（24 小时制、东八区）；错误统一返回 `{ error: { code, message } }`；今日不处理跨域（CORS 在 Day 16+ 接真实接口时再配）。
+> **约定**：所有时间一律 `YYYY-MM-DD HH:mm`（24 小时制、东八区）；**成功/错误统一返回 `{ ok, data, error }`**（见 §一）；**`GET /api/items` 已在 Day 17 实现并产出真实数据**，其余接口今日仍只登记占位、不实现；今日不处理跨域（CORS 在 Day 16+ 接真实接口时再配）。
 > **⚠️ 数据源决策（待 Day 16 拍板）**：本契约目前假设后端用 **CloudBase 文档型数据库（NoSQL）** 承载 `items` 表；但 PRD 的 MVP 写明「数据字段存**腾讯文档**」。两者指向不同数据源，**Day 16 前必须拍板**：
 > - 选**腾讯文档**：云函数改为读写腾讯文档表格/多维表，`items` 表映射到腾讯文档的一个表；需腾讯文档 OpenAPI 凭证（SecretId/Token），按 AGENTS §五 **凭证与文档 ID 绝不入仓、走环境变量/密钥管理**。
 > - 选 **CloudBase 数据库**：维持本契约现状，PRD 的「存腾讯文档」降为阶段二可选。
@@ -17,8 +17,8 @@
 | Base URL | CloudBase HTTP 触发域名（Day 15 部署后确定，形如 `https://xxx.apigw.tencentcs.com/release` 或云开发默认域名）。前端静态托管与云函数可共用同一环境。 |
 | 请求体 | `application/json`（POST/PUT）。 |
 | 日期时间 | `YYYY-MM-DD HH:mm`，字符串，东八区。 |
-| 成功响应 | 直接返回业务字段（见各接口示例），HTTP 状态 `200`。 |
-| 错误响应 | `HTTP 4xx/5xx`，正文：`{ "error": { "code": 整数, "message": "可读说明" } }`。 |
+| 成功响应 | 统一返回 `{ "ok": true, "data": <业务数据>, "error": null }`，HTTP 状态 `200`。（Day 17 起全站统一此形状；此前 `GET /api/health` 已是 `{ok:true}` 风格，现一并纳入。） |
+| 错误响应 | `HTTP 4xx/5xx`，正文：`{ "ok": false, "data": null, "error": { "code": 整数, "message": "可读说明" } }`。 |
 | 鉴权 | Day 15 暂不鉴权（开发期）。Day 16+ 确定（匿名登录 / 自定义登录）。**密钥与连接串不进仓库**（AGENTS.md §五）。 |
 | 跨域 | 暂不配置。前端 mock 版不请求后端，无跨域问题；接真实接口时再在云函数/网关配 CORS。 |
 
@@ -61,8 +61,8 @@
 
 ---
 
-### 2. `GET /api/items`　【📋 占位 · Day 16–20】　★ 列表读取接口（记录表读取）
-前端周时间线、总览、筛选都要靠它拉取事项列表。
+### 2. `GET /api/items`　【✅ 已实现 · Day 17】　★ 列表读取接口（记录表读取）
+前端周时间线、总览、筛选都要靠它拉取事项列表。读取**组织内多归属共享**的 `items` 表（WorkShop 面向组织，数据来自多人经共享库/腾讯文档录入）。
 
 - **查询参数**（全部可选）：
   | 参数 | 类型 | 说明 |
@@ -74,20 +74,25 @@
   | `type` | string | 按类型过滤 |
   | `ownerKey` | string | 按归属标签过滤 |
   | `keyword` | string | 标题模糊搜索 |
-- **响应 200**：
+  | `limit` | integer | 返回条数上限（余力加练；默认不限制） |
+- **响应 200**（统一 `{ ok, data, error }` 形状，`data` 为事项数组）：
 ```json
 {
-  "items": [
+  "ok": true,
+  "data": [
     {
       "id": "s1", "table": "work", "type": "meeting", "title": "部门周例会",
       "startTime": "2026-09-28 10:00", "endTime": "2026-09-28 11:00",
       "attendees": "全体", "venue": "302会议室", "note": "本周要点同步",
       "ownerKey": "self", "createdAt": "2026-09-27 11:00", "updatedAt": "2026-09-27 11:00"
     }
-  ]
+  ],
+  "error": null
 }
 ```
-- **错误**：`400 { "error": { "code": 400, "message": "invalid week param" } }`；`500` 服务端错误。
+- **错误**：`400 { "ok": false, "data": null, "error": { "code": 400, "message": "invalid week param" } }`；`500` 服务端错误（如数据库连接失败）。
+- **部署位置**：云函数 `items`（见 `source/cloud/items/`），HTTP 触发路径 `/api/items`。共享集群 PG 不暴露 IP:Port、且 `@cloudbase/node-sdk` 的 `app.rdb()` 在「老环境+后挂共享集群」下会因 `Accept-Profile` 头取不到 schema 而报错；故本函数**零依赖直打 CloudBase PostgREST HTTP API**（`https://<envId>.api.tcloudbasegateway.com/v1/rdb/rest/items`），显式设置 `Accept-Profile`/`Content-Profile` 头；过滤条件由 PostgREST 参数化（无字符串拼接 SQL），函数内做 snake_case → camelCase 字段映射。详见 `source/cloud/items/index.js` 头部注释。
+- **鉴权（已对照官方文档核实）**：PostgREST 统一用 `Authorization: Bearer <token>`。云函数读「组织共享 items」属服务端管理读，**首选设环境变量 `CB_API_KEY` = 服务端 API Key（service_role，绕过 RLS，无需登录）**；不设则兜底走匿名登录（需 `X-CloudBase-DeviceId` 头，且若表开 RLS 未对 anon 开放 SELECT 会读不到）。若在控制台「ApiKey 管理页」创建密钥，请选**服务端**类型，切勿把密钥写进代码/仓库或暴露到浏览器。
 
 ---
 
@@ -146,7 +151,7 @@ MVP 三大功能之一（PRD §4）。接收图片或表格文件，调用外部
 | 接口 | 方法 | 状态 | 计划 |
 |---|---|---|---|
 | `/api/health` | GET | ✅ 已实现 | Day 15 |
-| `/api/items` | GET | 📋 占位 | Day 16–20 |
+| `/api/items` | GET | ✅ 已实现 | Day 17 |
 | `/api/items` | POST | 📋 占位 | Day 16–20 |
 | `/api/items/:id` | GET | 📋 占位 | Day 16–20 |
 | `/api/items/:id` | PUT | 📋 占位 | Day 16–20 |
@@ -154,3 +159,4 @@ MVP 三大功能之一（PRD §4）。接收图片或表格文件，调用外部
 | `/api/import` | POST | 📋 占位 | Day 16–20 |
 
 > Day 15 只登记以上契约，**不写任何业务接口代码、不建表、不配跨域**（依清单「今日不做」）。
+> **⚠️ 响应形状变更（Day 17）**：自 `GET /api/items` 起，全站成功/错误统一为 `{ ok, data, error }`（见 §一）。其余仍未实现的接口，其示例中的"直接返回业务字段 / `{ok:true,deleted}`"等旧写法，待实现时**一律按此统一形状包裹**（`data` 承载原业务载荷，`error` 承载原 `{error:{...}}`），不再保留裸字段返回。
