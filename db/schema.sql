@@ -98,6 +98,7 @@ CREATE TABLE items (
   source             VARCHAR(20)  NOT NULL DEFAULT 'manual',
   status             VARCHAR(20)  NOT NULL DEFAULT 'scheduled',
   owner_key          VARCHAR(32)  NOT NULL DEFAULT 'self',
+  idempotency_key    VARCHAR(64)  UNIQUE,   -- A+B 方案：幂等键，同一键值重复提交被唯一约束拒绝（API 返回 409）
   meeting_request_id INT,
   external_id        VARCHAR(64),
   created_at         TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -177,6 +178,7 @@ COMMENT ON COLUMN items.note               IS '备注；TEXT';
 COMMENT ON COLUMN items.source             IS '来源 manual 手动 / import 导入识别；VARCHAR 语义值';
 COMMENT ON COLUMN items.status             IS '状态 scheduled 已排 / pending 待排；VARCHAR 语义值';
 COMMENT ON COLUMN items.owner_key          IS '归属记号 key，关联 owners.owner_key（应用层 join，无 FK）';
+COMMENT ON COLUMN items.idempotency_key    IS '幂等键：同一键值重复提交被数据库唯一约束拒绝，API 返回 409。NULL 不约束，历史 seed 数据兼容。';
 COMMENT ON COLUMN items.meeting_request_id IS '关联 meeting_requests.id（由会议要求生成的事项填此值，普通事项为空）';
 COMMENT ON COLUMN items.external_id        IS '【预留·腾讯文档】记录 ID，未同步为空';
 COMMENT ON COLUMN items.created_at         IS '创建时间';

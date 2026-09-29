@@ -2,7 +2,7 @@
 
 > **定位**：本文档是第 3 周（Day 16–20）「建表 + 写接口」的**唯一依据**。
 > **当前状态**：除 `/api/health` 已在 Day 15 实现外，其余接口今日**只登记占位、不实现**。
-> **约定**：所有时间一律 `YYYY-MM-DD HH:mm`（24 小时制、东八区）；**成功/错误统一返回 `{ ok, data, error }`**（见 §一）；**`GET /api/items` 已在 Day 17 实现并产出真实数据**，其余接口今日仍只登记占位、不实现；今日不处理跨域（CORS 在 Day 16+ 接真实接口时再配）。
+> **约定**：所有时间一律 `YYYY-MM-DD HH:mm`（24 小时制、东八区）；**成功/错误统一返回 `{ ok, data, error }`**（见 §一）；**`GET /api/items` 已在 Day 17 实现并产出真实数据**，POST /api/items 已在 Day 18 实现（真实写入+读回验证）；其余接口仍只登记占位、不实现；今日不处理跨域（CORS 在 Day 16+ 接真实接口时再配）。
 > **⚠️ 数据源决策（待 Day 16 拍板）**：本契约目前假设后端用 **CloudBase 文档型数据库（NoSQL）** 承载 `items` 表；但 PRD 的 MVP 写明「数据字段存**腾讯文档**」。两者指向不同数据源，**Day 16 前必须拍板**：
 > - 选**腾讯文档**：云函数改为读写腾讯文档表格/多维表，`items` 表映射到腾讯文档的一个表；需腾讯文档 OpenAPI 凭证（SecretId/Token），按 AGENTS §五 **凭证与文档 ID 绝不入仓、走环境变量/密钥管理**。
 > - 选 **CloudBase 数据库**：维持本契约现状，PRD 的「存腾讯文档」降为阶段二可选。
@@ -96,17 +96,29 @@
 
 ---
 
-### 3. `POST /api/items`　【📋 占位 · Day 16–20】　新建事项
-- **请求体**（不含 `id`/`createdAt`/`updatedAt`，后端生成）：
+### 3. `POST /api/items`　【✅ 已实现 · Day 18】　新建事项
+- **部署位置**：复用 `items` 云函数（`source/cloud/items/index.js`），HTTP 触发路径 `/api/items`，与 `GET` 同源；写入走 PostgREST 通道（同 §2，零依赖、service_role 密钥 `CB_API_KEY`）。
+- **请求体**（不含 `id`/`createdAt`/`updatedAt`，后端生成；camelCase，写入时映射为 snake_case）：
 ```json
 {
   "table": "work", "type": "meeting", "title": "临时碰头",
   "startTime": "2026-09-30 15:00", "endTime": "2026-09-30 16:00",
-  "attendees": "李工", "venue": "线上", "note": "", "ownerKey": "self"
+  "attendees": "李工", "venue": "线上", "note": "", "ownerKey": "self",
+  "idempotencyKey": "day18-b-001"
 }
 ```
-- **响应 201**：返回新建项（含 `id`/`createdAt`/`updatedAt`）。
-- **错误**：`400 { "error": { "code": 400, "message": "missing required field: title" } }`；`422` 时间区间非法。
+  - 可选字段 `idempotencyKey`（幂等键，客户端自生成字符串）：传了则重复提交同一 key 触发 409；不传也能正常写入（该列 NULL，不受 UNIQUE 约束）。用于防御前端重试/重复点击。
+- **必填**：`title`/`table`/`type`/`startTime`/`endTime`/`ownerKey`；缺任一 → `400 {ok:false,error:{code:400,message:"缺少必填字段：<中文名>"}}`。
+- **取值校验**：`table∈{work,daily}`；`type` 取契约允许集；`ownerKey∈{self,depta,deptb,deptc,deptd,me}`；`startTime`/`endTime` 须 `YYYY-MM-DD HH:mm` 且 `endTime≥startTime` → 否则 `400`/`422`（中文）。
+- **🛡️ 防重复提交（Day 18 选「A+B 双保险」）**：
+  - **A 内容去重**：插入前按 `(title+start_time+end_time+owner_key+table_kind+type)` 查重，命中 → `409 {ok:false,error:{code:409,message:"请勿重复提交：该事项已存在"}}`（不依赖额外字段，天然拦截同内容重复会议）。
+  - **B 幂等键兜底**：`items` 表新增 `idempotency_key VARCHAR(64) UNIQUE` 列；请求体可带 `idempotencyKey`（客户端自生成），写入时映射该列。数据库唯一约束兜底，同一 key 重复提交 → `409 {ok:false,error:{code:409,message:"请勿重复提交：该请求已处理（idempotencyKey 重复）"}}`。不传 `idempotencyKey` 也能正常写入（该列 NULL，不受 UNIQUE 约束）。
+  - 两者独立互补：A 按内容拦、B 按 key 拦，覆盖「误重试」与「内容真同」两种重复场景。
+- **响应（HTTP 200，统一 `{ok,data,error}` 形状）**：
+```json
+{ "ok": true, "data": { "id": 11, "title": "临时碰头", "type": "meeting", "table": "work", "startTime": "2026-09-30 15:00", "endTime": "2026-09-30 16:00", "attendees": "李工", "venue": "线上", "note": "", "ownerKey": "self", "createdAt": "2026-09-29 09:00", "updatedAt": "2026-09-29 09:00" }, "error": null }
+```
+- **错误**：`400` 缺字段/取值非法（中文）；`409` 重复提交（**内容重复**或 **idempotencyKey 重复**，均为中文）；`422` 时间区间非法（中文）；`500` 服务端/写入失败。
 
 ---
 
@@ -152,7 +164,7 @@ MVP 三大功能之一（PRD §4）。接收图片或表格文件，调用外部
 |---|---|---|---|
 | `/api/health` | GET | ✅ 已实现 | Day 15 |
 | `/api/items` | GET | ✅ 已实现 | Day 17 |
-| `/api/items` | POST | 📋 占位 | Day 16–20 |
+| `/api/items` | POST | ✅ 已实现 | Day 18 |
 | `/api/items/:id` | GET | 📋 占位 | Day 16–20 |
 | `/api/items/:id` | PUT | 📋 占位 | Day 16–20 |
 | `/api/items/:id` | DELETE | 📋 占位 | Day 16–20 |
