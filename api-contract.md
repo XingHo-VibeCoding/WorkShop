@@ -2,7 +2,7 @@
 
 > **定位**：本文档是第 3 周（Day 16–20）「建表 + 写接口」的**唯一依据**。
 > **当前状态**：除 `/api/health` 已在 Day 15 实现外，其余接口今日**只登记占位、不实现**。
-> **约定**：所有时间一律 `YYYY-MM-DD HH:mm`（24 小时制、东八区）；**成功/错误统一返回 `{ ok, data, error }`**（见 §一）；**`GET /api/items` 已在 Day 17 实现并产出真实数据**，POST /api/items 已在 Day 18 实现（真实写入+读回验证）；其余接口仍只登记占位、不实现；今日不处理跨域（CORS 在 Day 16+ 接真实接口时再配）。
+> **约定**：所有时间一律 `YYYY-MM-DD HH:mm`（24 小时制、东八区）；**成功/错误统一返回 `{ ok, data, error }`**（见 §一）；**`GET /api/items` 已在 Day 17 实现并产出真实数据**，POST /api/items 已在 Day 18 实现（真实写入+读回验证）；其余接口仍只登记占位、不实现；跨域（CORS）已在 Day 20 配置（见 §一）。
 > **⚠️ 数据源决策（待 Day 16 拍板）**：本契约目前假设后端用 **CloudBase 文档型数据库（NoSQL）** 承载 `items` 表；但 PRD 的 MVP 写明「数据字段存**腾讯文档**」。两者指向不同数据源，**Day 16 前必须拍板**：
 > - 选**腾讯文档**：云函数改为读写腾讯文档表格/多维表，`items` 表映射到腾讯文档的一个表；需腾讯文档 OpenAPI 凭证（SecretId/Token），按 AGENTS §五 **凭证与文档 ID 绝不入仓、走环境变量/密钥管理**。
 > - 选 **CloudBase 数据库**：维持本契约现状，PRD 的「存腾讯文档」降为阶段二可选。
@@ -20,7 +20,7 @@
 | 成功响应 | 统一返回 `{ "ok": true, "data": <业务数据>, "error": null }`，HTTP 状态 `200`。（Day 17 起全站统一此形状；此前 `GET /api/health` 已是 `{ok:true}` 风格，现一并纳入。） |
 | 错误响应 | `HTTP 4xx/5xx`，正文：`{ "ok": false, "data": null, "error": { "code": 整数, "message": "可读说明" } }`。 |
 | 鉴权 | Day 15 暂不鉴权（开发期）。Day 16+ 确定（匿名登录 / 自定义登录）。**密钥与连接串不进仓库**（AGENTS.md §五）。 |
-| 跨域 | 暂不配置。前端 mock 版不请求后端，无跨域问题；接真实接口时再在云函数/网关配 CORS。 |
+| 跨域 | 【✅ Day 20 已配置】CORS 白名单在**云函数响应头**实现（HTTP 网关无独立 CORS 配置项）：`Access-Control-Allow-Origin` 仅回给白名单内的 Origin（生产静态托管域名 + 本地调试 localhost:8080/127.0.0.1:8080），**禁止 `*` 通配符**；`items` 函数接 OPTIONS 预检（204，允许 GET/POST/OPTIONS + Content-Type）；函数返回形态为 `{ statusCode, headers, body }` 完整结构（裸对象返回时自定义头会被平台丢弃）。 |
 
 ---
 

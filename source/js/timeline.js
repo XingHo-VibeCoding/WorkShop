@@ -115,21 +115,66 @@ function setState(s, msg) {
     showGlobalState(null); showViews(); renderCurrentView();
   }
   const sync = document.getElementById('stat-sync');
-  if (sync) { sync.textContent = '同步状态：本地内存（未接入腾讯文档）'; sync.dataset.state = s; }
+  if (sync) { sync.textContent = '同步状态：公网接口已连接（CloudBase items 表）'; sync.dataset.state = s; }
 }
 
-// ---- 数据层：异步加载（mock 返回 Promise，预留真实 API 接缝）----
-/* 真实接口实装后，loadItems 改为 fetch('/api/schedule?week=...') 等；
-   当前用本地 mock + setTimeout 模拟网络延迟，并支持 URL 调试参数 ?debug=empty|error 触发各状态。 */
+// ---- [Day 20] 真实 API 接线：loadItems 从 mock 切换为调用公网接口 ----
+/* API 地址 = CloudBase HTTP 网关默认域名（Day 15 部署，路由 /api/items 在 Day 17 配置）。
+   此地址为公开免鉴权路由，不含任何密钥；密钥（CB_API_KEY）只存在于云函数环境变量中。
+   接口契约见 api-contract.md §2：GET /api/items?start=&end= → { ok, data, error }。 */
+const API_BASE = 'https://workshop-d4g02a7z81ff51a63-1d496602788.ap-shanghai.app.tcloudbase.com';
+
+// Date → "YYYY-MM-DD HH:mm"（本地时区，东八区）
+function fmtAPITime(d) {
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// API 事项 → 前端内部结构：后端 startTime/endTime 是全量时间字符串，
+// 前端内部用 start(Date) + startTime/endTime(HH:mm) 分离，此处负责拆分（契约 §二）。
+// ⚠️ start 必须归一到当天 00:00:00——mock 时代 render() 按 start 与「当天零点」
+// 全等匹配分列（timeline.js 渲染处的隐含约定），带时刻会导致一条都匹配不上。
+// API 类型词表 → 前端 CSS 词表。数据库存的是 API 词（course/travel/...），
+// 前端色板/图例/筛选按 mock 词表（class/trip/...）定义；未知词兜底为 other（灰）。
+const API_TYPE_MAP = { meeting: 'meeting', course: 'class', travel: 'trip', sport: 'sport', life: 'life', pending: 'pending' };
+const apiTypeToLocal = t => API_TYPE_MAP[t] || 'other';
+
+function apiItemToLocal(a) {
+  const t = s => String(s || '').slice(11, 16);            // "YYYY-MM-DD HH:mm" → "HH:mm"
+  const datePart = String(a.startTime || '').slice(0, 10); // "YYYY-MM-DD"
+  return {
+    id: String(a.id),
+    table: a.table,
+    type: apiTypeToLocal(a.type),
+    title: a.title,
+    start: new Date(`${datePart}T00:00:00`),
+    startTime: t(a.startTime),
+    endTime: t(a.endTime),
+    attendees: a.attendees || '',
+    venue: a.venue || '',
+    note: a.note || '',
+    ownerKey: a.ownerKey,
+  };
+}
+
 function loadItems(weekOffset = 0) {
   const debug = new URLSearchParams(location.search).get('debug');
-  return new Promise((resolve, reject) => {
-    setTimeout(() => {
-      if (debug === 'empty') return resolve([]);                       // 演示「空」状态
-      if (debug === 'error') return reject(new Error('模拟：腾讯文档读取失败（401 未授权）')); // 演示「错误」状态
-      resolve(seedItems(mondayOf(weekOffset)).filter(it => !deletedIds.has(it.id))); // 正常：返回 mock 数据，并剔除已删除项（跨周持久）
-    }, 600);
-  });
+  if (debug === 'empty') return Promise.resolve([]);                              // 演示「空」状态
+  if (debug === 'error') return Promise.reject(new Error('模拟：接口读取失败（调试参数触发）'));
+  const monday = mondayOf(weekOffset);
+  const sundayEnd = addDays(monday, 6);
+  sundayEnd.setHours(23, 59, 0, 0);
+  const url = `${API_BASE}/api/items?start=${encodeURIComponent(fmtAPITime(monday))}&end=${encodeURIComponent(fmtAPITime(sundayEnd))}`;
+  return fetch(url)
+    .then(async res => {
+      let j = null;
+      try { j = await res.json(); } catch (e) { /* 非 JSON 响应，走下方统一报错 */ }
+      if (!res.ok || !j || !j.ok) {
+        const msg = (j && j.error && j.error.message) || `接口异常（HTTP ${res.status}）`;
+        throw new Error(msg);
+      }
+      return j.data.map(apiItemToLocal).filter(it => !deletedIds.has(it.id)); // 剔除本页已删项
+    });
 }
 
 // ---- 内存态数据（seed；步骤4 再落腾讯文档）----
@@ -682,6 +727,18 @@ function render() {
     : atMax ? `⚠ 已到最晚可查看周（往后最多 ${WEEK_MAX} 周）` : '';
 }
 
+// ---- [Day 20 修复] 关闭移动端详情抽屉 ----
+/* closeDetailDrawer 在 Day 14 就被 showDetail(null) 引用，但函数体一直没写（潜伏 bug）：
+   mock 时代每周都有种子数据，此分支永远跑不到；Day 20 接真实数据库后空周必触发，
+   ReferenceError 被 bootstrap 的 catch 接住 → 整页误报「加载失败」。
+   行为按 base.css 的移动端抽屉契约实现：移除 .open 收起底部抽屉与遮罩；桌面端无该类，安全空操作。 */
+function closeDetailDrawer() {
+  const d = document.getElementById('detail');
+  if (d) d.classList.remove('open');
+  const scrim = document.querySelector('.detail-scrim');
+  if (scrim) scrim.classList.remove('open');
+}
+
 function showDetail(item) {
   currentItem = item || null;
   const d = document.getElementById('detail');
@@ -741,6 +798,22 @@ function renderForm(existing) {
         <label>标题<input name="title" value="${isEdit ? esc(existing.title) : ''}" required maxlength="40"></label>
         <label>类型<select name="type" id="f-type">${typeOptionsHTML(tbl, isEdit ? existing.type : 'meeting')}</select></label>
         <label>日期（本周）<select name="day">${dayOpts}</select></label>
+        <div id="f-range" class="cond-field" ${isEdit ? 'hidden' : ''}>
+          <label>重复规则<select name="repeat" id="f-repeat">
+            <option value="none">不重复（单次）</option>
+            <option value="daily">每日</option>
+            <option value="weekday">每工作日（周一至周五）</option>
+            <option value="mon">每周一</option>
+            <option value="tue">每周二</option>
+            <option value="wed">每周三</option>
+            <option value="thu">每周四</option>
+            <option value="fri">每周五</option>
+            <option value="sat">每周六</option>
+            <option value="sun">每周日</option>
+          </select></label>
+          <label>区间结束日（可选）<input type="date" name="endDate" id="f-enddate"></label>
+          <p class="range-preview" id="range-preview"></p>
+        </div>
         <div class="row2">
           <label>开始<input name="startTime" value="${isEdit ? existing.startTime : '09:00'}" placeholder="HH:mm"></label>
           <label>结束<input name="endTime" value="${isEdit ? existing.endTime : '10:00'}" placeholder="HH:mm"></label>
@@ -766,6 +839,27 @@ function renderForm(existing) {
   fTable.addEventListener('change', syncCond);
   syncCond();
 
+  // [板块B] 区间插入预览：选重复规则 + 结束日时，实时算出将生成多少条
+  const fRepeat = document.getElementById('f-repeat');
+  const fEnd = document.getElementById('f-enddate');
+  const fDay = f.querySelector('[name="day"]');
+  const previewEl = document.getElementById('range-preview');
+  const updateRangePreview = () => {
+    if (!previewEl || !fRepeat || !fEnd || !fDay) return;
+    const rep = fRepeat.value;
+    const es = fEnd.value;
+    if (rep === 'none' || !es) { previewEl.textContent = ''; return; }
+    const startD = addDays(mondayOf(currentOffset), parseInt(fDay.value, 10));
+    const endD = new Date(es + 'T00:00:00');
+    if (isNaN(endD.getTime()) || endD < startD) { previewEl.textContent = '结束日需不早于起始日'; return; }
+    let n = 0; const d = new Date(startD);
+    while (d <= endD) { if (matchRule(d, rep)) n++; d = addDays(d, 1); }
+    previewEl.textContent = `将生成约 ${n} 条（${fmtMD(startD)} 起，至 ${es}）`;
+  };
+  if (fRepeat) fRepeat.addEventListener('change', updateRangePreview);
+  if (fEnd) fEnd.addEventListener('input', updateRangePreview);
+  if (fDay) fDay.addEventListener('change', updateRangePreview);
+
   document.getElementById('item-form').addEventListener('submit', e => { e.preventDefault(); saveItem(existing); });
   document.getElementById('btn-cancel').addEventListener('click', () => showDetail(existing || null));
 }
@@ -775,6 +869,15 @@ function typeOptionsHTML(table, selected) {
     ? [['class', '课表'], ['sport', '运动'], ['life', '生活'], ['other', '其他']]
     : [['meeting', '会议'], ['trip', '行程'], ['pending', '待安排']];
   return map.map(([v, l]) => `<option value="${v}" ${v === selected ? 'selected' : ''}>${l}</option>`).join('');
+}
+
+// [板块B] 重复规则匹配：判断某天 d 是否落在规则内（dw: 0=周日）
+function matchRule(d, rule) {
+  const dw = d.getDay();
+  if (rule === 'daily') return true;
+  if (rule === 'weekday') return dw >= 1 && dw <= 5;
+  const map = { mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6, sun: 0 };
+  return map[rule] !== undefined && dw === map[rule];
 }
 
 function saveItem(existing) {
@@ -795,6 +898,30 @@ function saveItem(existing) {
     start,
     ownerKey: table === 'work' ? fd.get('ownerKey') : 'me',
   };
+  // [板块B] 区间批量插入（仅新建、且选了重复规则 + 结束日）：把长期日程展开成多条
+  const repeat = fd.get('repeat') || 'none';
+  const endDateStr = fd.get('endDate') || '';
+  if (!existing && repeat !== 'none' && endDateStr) {
+    const endD = new Date(endDateStr + 'T00:00:00');
+    if (!isNaN(endD.getTime()) && endD >= start) {
+      const generated = [];
+      let d = new Date(start), i = 0;
+      while (d <= endD) {
+        if (matchRule(d, repeat)) {
+          generated.push(Object.assign({ id: 'u' + Date.now() + '-' + i }, data, { start: new Date(d) }));
+          i++;
+        }
+        d = addDays(d, 1);
+      }
+      if (generated.length) {
+        generated.forEach(g => items.push(g));
+        showDetail(generated[0]);
+        afterMutation();
+        showToast(`已生成 ${generated.length} 条日程`);
+        return;
+      }
+    }
+  }
   let saved;
   if (existing) { Object.assign(existing, data); saved = existing; }
   else { saved = Object.assign({ id: 'u' + Date.now() }, data); items.push(saved); }

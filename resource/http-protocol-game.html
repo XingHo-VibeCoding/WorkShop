@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HTTP 协议闯关 · WorkShop 实战</title>
+<style>
+  :root{
+    --bg:#060912; --panel:#0d1426; --panel2:#111b33;
+    --ink:#e8eefc; --muted:#8aa0c8;
+    --cyan:#22d3ee; --pink:#f472b6; --gold:#fbbf24; --green:#34d399; --red:#fb7185;
+    --line:rgba(120,160,255,.16);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    font:15px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    color:var(--ink);
+    background:
+      radial-gradient(900px 500px at 12% -8%, rgba(34,211,238,.20), transparent 60%),
+      radial-gradient(820px 520px at 92% 4%, rgba(244,114,182,.18), transparent 60%),
+      radial-gradient(700px 600px at 50% 120%, rgba(123,97,255,.16), transparent 60%),
+      var(--bg);
+    background-attachment:fixed;
+    min-height:100vh; padding:28px 20px;
+  }
+  .wrap{max-width:1120px;margin:0 auto}
+  .hero{text-align:center;margin-bottom:22px}
+  .hero h1{
+    margin:0;font-size:46px;font-weight:800;letter-spacing:6px;
+    background:linear-gradient(92deg,var(--cyan),#a5f3fc 30%,var(--pink) 70%,var(--gold));
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+    text-shadow:0 0 26px rgba(34,211,238,.25);
+    animation:hue 6s linear infinite;
+  }
+  @keyframes hue{to{filter:hue-rotate(22deg)}}
+  .hero p{margin:8px 0 0;color:var(--muted);letter-spacing:1px}
+  .hero .tagline{
+    display:inline-block;margin-top:10px;padding:5px 16px;border:1px solid var(--line);
+    border-radius:999px;font-size:12px;color:var(--cyan);
+    box-shadow:0 0 18px rgba(34,211,238,.18) inset;
+  }
+
+  /* 流光进度条 */
+  .bar{height:8px;border-radius:999px;background:var(--panel2);overflow:hidden;margin:18px 0 22px;
+    border:1px solid var(--line)}
+  .bar>i{display:block;height:100%;width:0;border-radius:999px;
+    background:linear-gradient(90deg,var(--cyan),var(--pink));
+    box-shadow:0 0 16px var(--cyan);transition:width .5s ease;position:relative}
+  .bar>i::after{content:"";position:absolute;inset:0;
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,.55),transparent);
+    transform:translateX(-100%);animation:scan 1.6s linear infinite}
+  @keyframes scan{to{transform:translateX(100%)}}
+
+  .progress{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px}
+  .lv{flex:1;min-width:150px;position:relative;padding:14px 12px 12px;border-radius:14px;
+    background:linear-gradient(180deg,var(--panel2),var(--panel));
+    border:1px solid var(--line);cursor:pointer;overflow:hidden;
+    transition:transform .15s,box-shadow .2s,border-color .2s}
+  .lv::before{content:"";position:absolute;inset:0;opacity:0;
+    background:linear-gradient(120deg,transparent,rgba(34,211,238,.16),transparent);
+    transition:opacity .2s}
+  .lv:hover{transform:translateY(-4px);border-color:var(--cyan);
+    box-shadow:0 10px 30px rgba(34,211,238,.20)}
+  .lv:hover::before{opacity:1}
+  .lv .no{font-size:12px;letter-spacing:3px;color:var(--cyan);font-weight:700}
+  .lv .nm{font-size:14px;margin-top:4px;font-weight:600}
+  .lv.active{border-color:var(--pink);box-shadow:0 0 0 1px var(--pink),0 12px 34px rgba(244,114,182,.30)}
+  .lv.done .no{color:var(--green)}
+  .lv.done::after{content:"✔ 已通";position:absolute;top:8px;right:10px;font-size:11px;color:var(--green)}
+
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:880px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px;
+    box-shadow:0 8px 30px rgba(0,0,0,.35)}
+  .card h3{margin:0 0 12px;font-size:16px;color:var(--ink);
+    border-left:3px solid var(--cyan);padding-left:10px}
+  .card.know{font-size:14px;color:var(--muted)}
+  .card.know b{color:var(--ink)}
+  .card.know code,.console code{color:var(--cyan);background:rgba(34,211,238,.10);
+    padding:1px 6px;border-radius:6px;font-size:12.5px}
+  .badge{display:inline-block;padding:2px 10px;border-radius:8px;font-weight:700;font-size:12px}
+  .badge.ok{color:var(--green);background:rgba(52,211,153,.14);box-shadow:0 0 12px rgba(52,211,153,.25)}
+  .badge.warn{color:var(--gold);background:rgba(251,191,36,.14);box-shadow:0 0 12px rgba(251,191,36,.22)}
+  .badge.err{color:var(--red);background:rgba(251,113,133,.14);box-shadow:0 0 12px rgba(251,113,133,.22)}
+
+  .console{font-family:"SF Mono",Consolas,Menlo,monospace;font-size:12.5px}
+  .req,.res{white-space:pre-wrap;border-radius:10px;padding:12px;min-height:130px;margin:0;
+    background:#04070f;border:1px solid var(--line);overflow:auto}
+  .req{color:#7dd3fc}
+  .res{color:#86efac}
+  .lbl{color:var(--muted);font-size:11px;letter-spacing:2px;margin:12px 0 5px}
+  .btn{position:relative;overflow:hidden;margin-top:12px;background:linear-gradient(90deg,var(--cyan),#0ea5b7);
+    color:#04121a;border:0;border-radius:10px;padding:11px 20px;font-size:14px;font-weight:700;
+    cursor:pointer;letter-spacing:1px;box-shadow:0 0 20px rgba(34,211,238,.35)}
+  .btn:hover{box-shadow:0 0 30px rgba(34,211,238,.55)}
+  .btn.ghost{background:transparent;color:var(--cyan);border:1px solid var(--cyan);box-shadow:none}
+  .btn::after{content:"";position:absolute;top:0;left:-60%;width:50%;height:100%;
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,.65),transparent);
+    transform:skewX(-20deg);animation:btnscan 2.4s ease-in-out infinite}
+  @keyframes btnscan{0%,100%{left:-60%}55%{left:120%}}
+  .btn[disabled]{opacity:.6;cursor:wait}
+  .field{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:10px;
+    background:#04070f;color:var(--ink);font-family:inherit;font-size:13px;margin-top:8px}
+  .field:focus{outline:none;border-color:var(--cyan);box-shadow:0 0 14px rgba(34,211,238,.3)}
+  .hint{font-size:12.5px;color:var(--muted);margin-top:10px;min-height:18px}
+  .q button{display:block;width:100%;text-align:left;margin:7px 0;padding:9px 12px;
+    border:1px solid var(--line);border-radius:10px;background:var(--panel2);color:var(--ink);
+    cursor:pointer;font-size:13px;transition:.15s}
+  .q button:hover{border-color:var(--cyan)}
+  .q button.right{border-color:var(--green);background:rgba(52,211,153,.14)}
+  .q button.wrong{border-color:var(--red);background:rgba(251,113,133,.14)}
+  .win{text-align:center;padding:14px;border:1px dashed var(--gold);border-radius:14px;
+    color:var(--gold);margin-top:14px;letter-spacing:2px;text-shadow:0 0 14px rgba(251,191,36,.4)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hero">
+    <h1>HTTP 协议闯关</h1>
+    <p>WORKSHOP 实战 · 像打 BOSS 一样搞懂请求与响应</p>
+    <span class="tagline">5 关通关 · 每一关对照真实 /api/items 接口</span>
+  </div>
+
+  <div class="bar"><i id="barfill"></i></div>
+  <div class="progress" id="progress"></div>
+
+  <div class="grid">
+    <div class="card know" id="know"></div>
+    <div class="card">
+      <h3>控制台 · CONSOLE</h3>
+      <div class="console">
+        <div class="lbl">▶ 你发出的请求报文</div>
+        <pre class="req" id="req">（点「发送请求」看这里）</pre>
+        <div class="lbl">◀ 服务器返回的响应报文</div>
+        <pre class="res" id="res">（响应会显示在这里）</pre>
+      </div>
+      <div id="controls"></div>
+      <div class="hint" id="hint"></div>
+      <div id="win"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const LEVELS = [
+  { id:'L1', no:'LV.01', title:'GET 是什么',
+    know:`<b>HTTP 是「请求—响应」协议。</b>前端向服务器要东西，服务器回东西。<br><br>
+      <b>GET</b> = 去「拿」数据（不改服务器）。一个 GET：<br>
+      <code>GET /api/items?table=work HTTP/1.1</code><br>
+      <code>Host: workshop.xxx</code><br><br>
+      回 <span class="badge ok">200 OK</span> 表示成功，body 是 JSON。<br><br>
+      <b>WorkShop：</b>时间线首页本应发 GET 拉本周事项——但目前前端用本地内存假数据，没真发这请求（这就是「公网打开看不到真数据」的根因）。`,
+    build(){return{req:`GET /api/items?table=work HTTP/1.1
+Host: workshop-d4g02a7z81ff51a63.ap-shanghai.app.tcloudbase.com
+Accept: application/json`,
+      res:`HTTP/1.1 200 OK
+Content-Type: application/json
+
+{ "ok": true, "data": [ /* 本周事项列表 */ ], "error": null }`,
+      status:'ok',note:'200 = 成功。{ok,data,error} 是 WorkShop 统一响应形状。'}},
+    controls:`<button class="btn" onclick="send()">▶ 发送 GET 请求</button>` },
+
+  { id:'L2', no:'LV.02', title:'状态码百科',
+    know:`状态码是服务器回的「三位数结论」，五类：<br><br>
+      <span class="badge ok">2xx</span> 成功（200 拿到 / 201 新建）<br>
+      <span class="badge warn">4xx</span> 客户端问题（400 缺字段 / 409 冲突 / 422 校验不过）<br>
+      <span class="badge err">5xx</span> 服务器炸了（500）<br><br>
+      <b>WorkShop：</b>POST 重复提交回 <span class="badge warn">409</span>「请勿重复提交」；缺标题回 <span class="badge warn">400</span>「标题」。`,
+    quiz:true, build(){return{req:'',res:'',status:'',note:''}},
+    controls:`<div class="q" id="quiz"></div>` },
+
+  { id:'L3', no:'LV.03', title:'POST 与 Body',
+    know:`<b>POST</b> = 往服务器「提交」数据（会改动它）。GET 参数放 URL，POST 数据放 <b>body</b>。<br><br>
+      <code>POST /api/items HTTP/1.1</code><br>
+      <code>Content-Type: application/json</code><br>
+      <code>{ "title":"周会","start":"2026-10-06 14:00", ... }</code><br><br>
+      回 <span class="badge ok">201</span> 新建成功，或 <span class="badge warn">409</span> 重复。body 就是一条「会议/行程」事项。`,
+    build(){return{req:`POST /api/items HTTP/1.1
+Content-Type: application/json
+
+{
+  "title": "部门周会",
+  "start": "2026-10-06 14:00",
+  "end":   "2026-10-06 15:00",
+  "type":  "meeting",
+  "table": "work",
+  "idempotencyKey": "demo-001"
+}`,
+      res:`HTTP/1.1 201 Created
+Content-Type: application/json
+
+{ "ok": true, "data": { "id": "it_xxx", "title": "部门周会", ... }, "error": null }`,
+      status:'ok',note:'201 = 新建成功。带 idempotencyKey 防重复提交（再发变 409）。'}},
+    controls:`<button class="btn" onclick="send()">▶ 发送 POST 请求</button>
+      <button class="btn ghost" onclick="sendDup()">↻ 再发一次（看 409）</button>` },
+
+  { id:'L4', no:'LV.04', title:'Header 是什么',
+    know:`<b>Header</b> = 请求/响应头，是「元数据」，告诉对方怎么理解 body。<br><br>
+      • <code>Content-Type</code>：body 格式（如 <code>application/json</code>）<br>
+      • <code>Authorization</code>：身份凭证（后端用它换 Bearer 连数据库）<br>
+      • <code>Accept</code>：客户端想要什么格式<br><br>
+      <b>WorkShop：</b><code>db.js</code> 里 <code>getBearer()</code> 用 API_KEY 换 token，再放进 Authorization 头连 PostgREST 网关。`,
+    build(){return{req:`POST /api/items HTTP/1.1
+Content-Type: application/json
+Authorization: Bearer <token 由 API_KEY 换取>
+Accept: application/json
+
+{ "title": "..." }`,
+      res:`HTTP/1.1 201 Created
+Content-Type: application/json
+
+{ "ok": true, "data": { ... }, "error": null }`,
+      status:'ok',note:'没有正确 Authorization，网关拒（401/403）——数据安全第一道门。'}},
+    controls:`<button class="btn" onclick="send()">▶ 发送带 Header 的请求</button>` },
+
+  { id:'L5', no:'LV.05', title:'实战关 · 真打接口',
+    know:`前面都是<b>模拟响应</b>（离线可玩）。这关真打已上线接口：<br><br>
+      ① 填你的云函数地址（Day 19 你验证过的 <code>/api/items</code>）<br>
+      ② 点发送，浏览器真发 HTTP 请求、拿真实 JSON<br><br>
+      <b>注意：</b>浏览器「同源策略」——此页与接口不同域会被拦（CORS）。把本页也部署到 CloudBase 同域，或接口开 CORS 即可真通。`,
+    build(){return{req:'',res:'',status:'',note:''}},
+    controls:`<input class="field" id="realUrl" placeholder="https://你的/api/items?table=work">
+      <button class="btn" onclick="sendReal()">⚡ 真实发送 GET</button>`,
+    real:true }
+];
+
+let cur=0; const done=new Set();
+const progress=document.getElementById('progress');
+LEVELS.forEach((lv,i)=>{
+  const d=document.createElement('div'); d.className='lv'; d.id='lv'+i;
+  d.innerHTML='<div class="no">'+lv.no+'</div><div class="nm">'+lv.title+'</div>';
+  d.onclick=()=>go(i); progress.appendChild(d);
+});
+function updateBar(){document.getElementById('barfill').style.width=(done.size/LEVELS.length*100)+'%';}
+function go(i){
+  cur=i; LEVELS.forEach((_,k)=>{
+    const el=document.getElementById('lv'+k);
+    el.classList.toggle('active',k===i);
+    el.classList.toggle('done',done.has(k)&&k!==i);
+  });
+  const lv=LEVELS[i];
+  document.getElementById('know').innerHTML=lv.know;
+  document.getElementById('req').textContent='（点「发送请求」看这里）';
+  document.getElementById('res').textContent='（响应会显示在这里）';
+  document.getElementById('hint').textContent='';
+  document.getElementById('win').innerHTML='';
+  document.getElementById('controls').innerHTML=lv.controls;
+  if(lv.quiz) renderQuiz();
+}
+function markDone(){done.add(cur);document.getElementById('lv'+cur).classList.add('done');updateBar();
+  if(done.size===LEVELS.length)document.getElementById('win').innerHTML='<div class="win">★ 全部通关 · 你已掌握 HTTP 核心 ★</div>';}
+function busy(btn){btn.disabled=true;btn.textContent='请求中…';return btn;}
+function send(){
+  const b=event&&event.target; if(b)busy(b);
+  const r=LEVELS[cur].build();
+  setTimeout(()=>{
+    document.getElementById('req').textContent=r.req;
+    document.getElementById('res').textContent=r.res;
+    document.getElementById('hint').innerHTML='<span class="badge '+r.status+'">'+(r.status==='ok'?'成功':'注意')+'</span> '+r.note;
+    if(b){b.disabled=false;b.innerHTML='▶ 发送请求';}
+    markDone();
+  },420);
+}
+function sendDup(){
+  const b=event&&event.target; if(b)busy(b);
+  setTimeout(()=>{
+    document.getElementById('req').textContent=LEVELS[cur].build().req;
+    document.getElementById('res').textContent=
+`HTTP/1.1 409 Conflict
+Content-Type: application/json
+
+{ "ok": false, "data": null, "error": "请勿重复提交（idempotencyKey 已存在）" }`;
+    document.getElementById('hint').innerHTML='<span class="badge warn">409</span> 重复提交被拦——idempotencyKey 已存在，服务器保护了数据。';
+    if(b){b.disabled=false;b.innerHTML='↻ 再发一次（看 409）';}
+    markDone();
+  },420);
+}
+function sendReal(){
+  const url=document.getElementById('realUrl').value.trim();
+  if(!url){document.getElementById('hint').textContent='先填接口地址。';return;}
+  const b=event.target; busy(b);
+  document.getElementById('req').textContent='GET '+url+'\nHost: '+new URL(url).host+'\nAccept: application/json';
+  document.getElementById('res').textContent='（请求发送中…）';
+  fetch(url).then(r=>r.text().then(t=>({s:r.status,ok:r.ok,t})))
+    .then(({s,ok,t})=>{
+      document.getElementById('res').textContent='HTTP/1.1 '+s+'\n\n'+t;
+      document.getElementById('hint').innerHTML='<span class="badge '+(ok?'ok':'err')+'">'+s+'</span> 真实响应已返回。';
+      b.disabled=false;b.innerHTML='⚡ 真实发送 GET';markDone();
+    }).catch(e=>{
+      document.getElementById('res').textContent='请求失败：'+e.message;
+      document.getElementById('hint').innerHTML='<span class="badge err">CORS/网络</span> 多半跨域被浏览器拦——把本页部署到同域或开 CORS 即可。';
+      b.disabled=false;b.innerHTML='⚡ 真实发送 GET';
+    });
+}
+function renderQuiz(){
+  const box=document.getElementById('quiz');
+  const q={t:'POST 新建事项时，重复提交（同一 idempotencyKey）服务器回哪个码？',
+    opts:['200 OK','409 Conflict','500 Internal Error'],ans:1};
+  box.innerHTML='<div style="font-size:13px;margin-bottom:4px">'+q.t+'</div>'+
+    q.opts.map((o,i)=>'<button onclick="answer('+i+','+q.ans+',this)">'+o+'</button>').join('');
+}
+function answer(i,ans,el){
+  const btns=el.parentElement.querySelectorAll('button');btns.forEach(b=>b.disabled=true);
+  if(i===ans){el.classList.add('right');
+    document.getElementById('hint').innerHTML='<span class="badge ok">答对</span> 409 = 冲突，用来防重复提交。';markDone();
+  }else{el.classList.add('wrong');btns[ans].classList.add('right');
+    document.getElementById('hint').innerHTML='<span class="badge err">再想想</span> 重复提交是「冲突」→ 409。';}
+}
+updateBar(); go(0);
+</script>
+</body>
+</html>

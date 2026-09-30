@@ -135,6 +135,10 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .badge.type-life { background: var(--c-life); }
 .detail-card .row { margin: 7px 0; font-size: 13px; line-height: 1.5; }
 .detail-card .row b { color: var(--ink-soft); font-weight: 600; margin-right: 6px; }
+/* [板块B] 区间插入：重复规则 + 结束日 + 实时条数预览 */
+.range-preview { margin: 2px 0 6px; font-size: 12px; color: var(--accent); min-height: 15px; }
+#f-range label { display: block; margin: 8px 0 0; }
+#f-range select, #f-range input[type=date] { width: 100%; box-sizing: border-box; margin-top: 3px; }
 
 /* 详情里的记号标签（头像/符号通用） */
 .owner-mark {

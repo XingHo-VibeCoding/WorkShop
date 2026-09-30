@@ -13,6 +13,31 @@
 
 const db = require('./db.js');
 
+// —— 【Day 20 · CORS 配置】——
+// 浏览器跨域调用本接口时，响应必须带 Access-Control-Allow-Origin，否则被浏览器拦截。
+// 白名单只放行：生产静态托管域名 + 本地调试端口，禁止 * 通配符（Day 20 清单硬性要求）。
+// 返回形态从「裸对象」改为 { statusCode, headers, body }（自定义头必须用完整形态才会输出）。
+const ALLOWED_ORIGINS = [
+  'https://workshop-workshop-d4g02a7z81ff51a63.webapps.tcloudbase.com', // 生产：静态网站托管
+  'http://localhost:8080',  // 本地接线调试（Day 20，仅开发用）
+  'http://127.0.0.1:8080',  // 本地接线调试（Day 20，仅开发用）
+];
+
+function corsHeaders(event = {}, extra = {}) {
+  const h = event.headers || {};
+  const origin = h.origin || h.Origin || '';
+  const headers = { 'Content-Type': 'application/json; charset=utf-8', Vary: 'Origin', ...extra };
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    headers['Access-Control-Allow-Origin'] = origin;
+  }
+  return headers;
+}
+
+// 统一包成 HTTP 完整返回形态（业务逻辑仍返回裸 { ok, data, error }，在此处包壳）
+function http(event, payload, statusCode = 200) {
+  return { statusCode, headers: corsHeaders(event), body: JSON.stringify(payload) };
+}
+
 // —— HTTP 方法 / 请求体 / 查询参数解析（兼容 CloudBase 不同版本 event 形态）——
 function getQuery(event = {}) {
   let qs = event.queryString || event.queryStringParameters || event.httpQuery;
@@ -153,25 +178,39 @@ async function createItem(event) {
 
 exports.main = async (event = {}) => {
   const method = getMethod(event);
+
+  // 【Day 20】OPTIONS 预检：POST JSON 会先发预检请求，必须在业务处理前接住
+  if (method === 'OPTIONS') {
+    return {
+      statusCode: 204,
+      headers: corsHeaders(event, {
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Max-Age': '86400',
+      }),
+      body: '',
+    };
+  }
+
   if (method === 'POST') {
-    try { return await createItem(event); }
+    try { return http(event, await createItem(event)); }
     catch (err) {
-      return { ok: false, data: null, error: { code: 500, message: err && err.message ? err.message : String(err) } };
+      return http(event, { ok: false, data: null, error: { code: 500, message: err && err.message ? err.message : String(err) } }, 500);
     }
   }
   // 默认 GET：列表读取（调 DAL）
   const q = getQuery(event);
   try {
     const data = await db.queryItems(q);
-    return { ok: true, data, error: null };
+    return http(event, { ok: true, data, error: null });
   } catch (err) {
-    return {
+    return http(event, {
       ok: false,
       data: null,
       error: {
         code: 500,
         message: err && err.message ? err.message : String(err),
       },
-    };
+    }, 500);
   }
 };
