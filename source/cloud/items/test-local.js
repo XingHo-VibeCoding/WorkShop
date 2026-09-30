@@ -79,5 +79,9 @@ function assert(cond, msg) {
   r = await handler.main({ httpMethod: 'POST', body: JSON.stringify({ table: 'work', type: 'meeting', title: '带key的会', startTime: '2026-10-02 14:00', endTime: '2026-10-02 15:00', ownerKey: 'self', idempotencyKey: 'fresh-key-001' }) });
   assert(r.ok === true && r.data && r.data.id === 11, '带 idempotencyKey 首次写入 → ok:true: ' + JSON.stringify(r.data));
 
-  console.log('\n本地纯逻辑测试完毕（A+B 双保险：7 用例）。');
+  // 用例8：GET 列表读取 → ok:true 且 data 为数组（验证"查数据库"读路径随 DAL 回归）
+  const rg = await handler.main({ httpMethod: 'GET', queryString: 'table=work' });
+  assert(rg.ok === true && Array.isArray(rg.data), 'GET /api/items → ok:true 且 data 为数组: ' + JSON.stringify(rg).slice(0, 120));
+
+  console.log('\n本地纯逻辑测试完毕（A+B 双保险 + GET 读路径：8 用例）。');
 })();
