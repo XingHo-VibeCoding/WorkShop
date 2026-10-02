@@ -237,7 +237,18 @@ body { display: flex; flex-direction: column; height: 100vh; }
   .week-range { order: 3; width: 100%; text-align: left; }
   .layout { flex-direction: column; }
   /* [Day 14] 移动端：时间线占满屏；详情改为底部抽屉（bottom-sheet），不再并排常驻，避免与状态栏/弹窗覆盖冲突 */
-  .timeline { flex: 1 1 0; min-height: 0; height: auto; }
+  /* 边界锁死在本容器内（flex:1 1 0 + min-height:0），横纵都可滚但不带跑整页；横/纵均给自定义滑动块 */
+  .timeline {
+    flex: 1 1 0; min-height: 0; height: auto;
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;                 /* Firefox：细滚动条 */
+    scrollbar-color: var(--accent) var(--bg); /* 滑块色 / 轨迹色 */
+  }
+  .timeline::-webkit-scrollbar { width: 8px; height: 8px; }
+  .timeline::-webkit-scrollbar-track { background: var(--bg); border-radius: 4px; }
+  .timeline::-webkit-scrollbar-thumb { background: var(--accent); border-radius: 4px; }
+  .timeline::-webkit-scrollbar-thumb:hover { background: #1746b8; }
   .day-col { min-width: 116px; }
   .detail {
     position: fixed; left: 0; right: 0; bottom: 0;
