@@ -209,4 +209,102 @@ async function insertItem(row) {
   return { item: toItem(inserted) };
 }
 
-module.exports = { queryItems, findDuplicate, insertItem };
+// —— 【Day 22】PATCH /api/items/:id 第 1 步 —— 按 id 查单条 ——
+// 用途有二：① 判断这条记录存不存在（不存在要回 404，不能稀里糊涂返回 ok）；
+//          ② PATCH 是"部分更新"，只改开始时间时要拿库里的结束时间来校验区间，否则会改出 end < start。
+async function findItemById(id) {
+  const token = await getBearer();
+  const p = new URLSearchParams();
+  p.set('select', COLUMNS);
+  p.set('id', `eq.${id}`);
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/items?${p.toString()}`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Accept': 'application/json',
+      'Accept-Profile': SCHEMA,
+      'Content-Profile': SCHEMA,
+    },
+  });
+  const text = await res.text();
+  let json;
+  try { json = JSON.parse(text); }
+  catch (e) { throw new Error(`查询单条返回非 JSON（HTTP ${res.status}）：${text.slice(0, 200)}`); }
+  if (!res.ok) {
+    const msg = (json && (json.message || json.error || json.error_description || json.hint)) || `HTTP ${res.status}`;
+    throw new Error(`查询 items id=${id} 失败：${msg}`);
+  }
+  const rows = Array.isArray(json) ? json : (json && json.data) || [];
+  return rows.length ? toItem(rows[0]) : null;   // 查不到返回 null（由控制器翻成 404）
+}
+
+// —— 【Day 22】PATCH /api/items/:id 第 2 步 —— 按 id 更新（部分更新）——
+// ★ 必须带 `?id=eq.<具体值>` 过滤：PostgREST 的 PATCH 不带过滤条件会**整表更新**，
+//   这是"改"比"增"更危险的地方，所以这里把 id 拼进查询串，且由控制器保证 id 是正整数。
+// 返回：{ item } 成功 / { notFound: true } 该 id 不存在 / { error } 失败
+async function updateItem(id, patch) {
+  const token = await getBearer();
+  const updRes = await fetch(`${GATEWAY}/v1/rdb/rest/items?id=eq.${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Accept-Profile': SCHEMA,
+      'Content-Profile': SCHEMA,
+      'Prefer': 'return=representation',   // 要求网关把更新后的行回传，省一次读
+    },
+    body: JSON.stringify(patch),
+  });
+  const updText = await updRes.text();
+  let updJson;
+  try { updJson = JSON.parse(updText); }
+  catch (e) {
+    return { error: { code: 500, message: `更新返回非 JSON（HTTP ${updRes.status}）：${updText.slice(0, 200)}` } };
+  }
+  if (!updRes.ok) {
+    const msg = (updJson && (updJson.message || updJson.error || updJson.error_description || updJson.hint)) || `HTTP ${updRes.status}`;
+    // 唯一约束冲突（改成了和别人重复的内容 / 幂等键撞车）
+    const isDup = updRes.status === 409 || (updJson && (updJson.code === '23505' || /duplicate key/i.test(msg)));
+    if (isDup) return { error: { code: 409, message: '该修改与已有事项冲突（重复内容或重复幂等键），未保存' } };
+    return { error: { code: updRes.status, message: `更新 items id=${id} 失败：${msg}` } };
+  }
+  const rows = Array.isArray(updJson) ? updJson : (updJson && updJson.data) || [];
+  if (!rows.length) return { notFound: true };   // 影响 0 行 = 这个 id 根本不存在
+  return { item: toItem(rows[0]) };
+}
+
+// —— 【Day 22】DELETE /api/items/:id —— 按 id 删除（硬删除）——
+// ★★ 删除比新增容易出事，根子在这一行：PostgREST 的 DELETE 如果不带过滤条件，会**清空整张表**。
+//    所以这里把 `id=eq.<具体值>` 拼进 URL，且控制器侧强制 id 必填、必须是单个正整数，
+//    绝不允许出现「没有条件」或「条件是客户端随意给的批量范围」的删除。
+// ★ 带 `Prefer: return=representation` 让网关把被删的那行回传 —— 删完能留下"刚才删的是什么"的快照，
+//    这是硬删除唯一的一点可追溯性（真要能找回，得靠软删除 is_deleted，属今天的余力加练）。
+// 返回：{ deleted } 成功 / { notFound: true } 该 id 不存在 / { error } 失败
+async function deleteItem(id) {
+  const token = await getBearer();
+  const delRes = await fetch(`${GATEWAY}/v1/rdb/rest/items?id=eq.${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Accept': 'application/json',
+      'Accept-Profile': SCHEMA,
+      'Content-Profile': SCHEMA,
+      'Prefer': 'return=representation',
+    },
+  });
+  const delText = await delRes.text();
+  let delJson;
+  try { delJson = JSON.parse(delText); }
+  catch (e) {
+    return { error: { code: 500, message: `删除返回非 JSON（HTTP ${delRes.status}）：${delText.slice(0, 200)}` } };
+  }
+  if (!delRes.ok) {
+    const msg = (delJson && (delJson.message || delJson.error || delJson.error_description || delJson.hint)) || `HTTP ${delRes.status}`;
+    return { error: { code: delRes.status, message: `删除 items id=${id} 失败：${msg}` } };
+  }
+  const rows = Array.isArray(delJson) ? delJson : (delJson && delJson.data) || [];
+  if (!rows.length) return { notFound: true };   // 影响 0 行 = 这个 id 本来就不存在
+  return { deleted: toItem(rows[0]) };
+}
+
+module.exports = { queryItems, findDuplicate, insertItem, findItemById, updateItem, deleteItem };

@@ -177,6 +177,62 @@ function loadItems(weekOffset = 0) {
     });
 }
 
+// ---- [Day 22] 写链路接线：新建(POST) / 编辑(PATCH) / 删除(DELETE) ----
+/* 读链路 Day 20 已接云端（loadItems）；今天把写链路也接上，UI 上的增删改才真的落到库里。
+   三条原则：
+     1) 云端项（id 为纯数字，库里 SERIAL 主键）走接口；本地临时项（'u...' / 种子 's1' 等）只改内存并如实提示，
+        不拿假 id 去打接口（后端会 400 挡回，但前端先判掉更省一次往返）。
+     2) 失败一律可见：网络异常 / 400 / 404 / 409 / 422 都把后端的中文 message 原样显示，不静默吞掉。
+     3) 成功才改内存：先落库成功，再用接口返回的最新记录回写界面，避免"界面显示成功、库里没有"。 */
+
+// 前端色板词 → 库存词（库里既有数据是 course/travel，前端按 class/trip 定义样式）
+const LOCAL_TYPE_TO_API = { class: 'course', trip: 'travel' };
+const localTypeToApi = t => LOCAL_TYPE_TO_API[t] || t;
+
+// 是否为云端真实记录：库里 id 是 SERIAL 整数；本地临时 id 形如 'u1718…'、种子形如 's1'/'d1'
+const isCloudId = id => /^\d+$/.test(String(id || ''));
+
+// 前端内部项（start(Date) + startTime/endTime(HH:mm)）→ API 请求体（YYYY-MM-DD HH:mm 全量）
+function localItemToPayload(d) {
+  const p = n => String(n).padStart(2, '0');
+  const dateStr = `${d.start.getFullYear()}-${p(d.start.getMonth() + 1)}-${p(d.start.getDate())}`;
+  return {
+    table: d.table,
+    type: localTypeToApi(d.type),
+    title: d.title,
+    startTime: `${dateStr} ${d.startTime}`,
+    endTime: `${dateStr} ${d.endTime}`,
+    attendees: d.attendees || '',
+    venue: d.venue || '',
+    note: d.note || '',
+    ownerKey: d.ownerKey,
+  };
+}
+
+// 统一发写请求并解包 { ok, data, error }：失败抛 Error，把后端中文提示带出来（err.code 便于分支处理）
+async function apiMutate(method, url, body) {
+  let res;
+  try {
+    res = await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    throw new Error('网络异常：连不上服务器' + (e && e.message ? `（${e.message}）` : ''));
+  }
+  let j = null;
+  try { j = await res.json(); }
+  catch (e) { throw new Error(`接口返回异常（HTTP ${res.status}）`); }
+  if (!res.ok || !j || !j.ok) {
+    const msg = (j && j.error && j.error.message) || `接口异常（HTTP ${res.status}）`;
+    const err = new Error(msg);
+    err.code = (j && j.error && j.error.code) || res.status;
+    throw err;
+  }
+  return j.data;
+}
+
 // ---- 内存态数据（seed；步骤4 再落腾讯文档）----
 function seedItems(monday) {
   return [
@@ -829,6 +885,9 @@ function renderForm(existing) {
     </div>
     ${legendHTML()}`;
 
+  // [Day 22 修复] f 此前在本函数内从未定义，901 行 f.querySelector 会抛 ReferenceError，
+  // 导致下方 submit 绑定整段不执行 —— 点「创建」走的是浏览器原生表单提交（整页刷新、数据丢失）。
+  const f = document.getElementById('item-form');
   const fTable = document.getElementById('f-table');
   const fType = document.getElementById('f-type');
   const syncCond = () => {
@@ -880,7 +939,7 @@ function matchRule(d, rule) {
   return map[rule] !== undefined && dw === map[rule];
 }
 
-function saveItem(existing) {
+async function saveItem(existing) {
   const f = document.getElementById('item-form');
   const fd = new FormData(f);
   const table = fd.get('table');
@@ -898,7 +957,15 @@ function saveItem(existing) {
     start,
     ownerKey: table === 'work' ? fd.get('ownerKey') : 'me',
   };
+
+  // ---- 越界①/②：前端先挡一道，后端还有 400/422 兜底（双保险，省一次往返）----
+  if (!data.title) { showToast('请填写标题'); return; }
+  if (data.startTime && data.endTime && data.endTime < data.startTime) {
+    showToast('结束时间不能早于开始时间'); return;
+  }
+
   // [板块B] 区间批量插入（仅新建、且选了重复规则 + 结束日）：把长期日程展开成多条
+  // 批量写库属「今日不做」，故仍只进内存，但文案如实告知未同步，避免误以为已落库
   const repeat = fd.get('repeat') || 'none';
   const endDateStr = fd.get('endDate') || '';
   if (!existing && repeat !== 'none' && endDateStr) {
@@ -917,17 +984,49 @@ function saveItem(existing) {
         generated.forEach(g => items.push(g));
         showDetail(generated[0]);
         afterMutation();
-        showToast(`已生成 ${generated.length} 条日程`);
+        showToast(`已生成 ${generated.length} 条日程（批量生成仅在本页，未同步云端）`);
         return;
       }
     }
   }
-  let saved;
-  if (existing) { Object.assign(existing, data); saved = existing; }
-  else { saved = Object.assign({ id: 'u' + Date.now() }, data); items.push(saved); }
-  showDetail(saved);   // 保存后右侧栏立即回显最新内容（修复表单残留）
-  afterMutation();
-  showToast('已保存');  // 状态提醒：备注/字段修改已落盘
+
+  const payload = localItemToPayload(data);
+
+  // ---- 编辑已有项 ----
+  if (existing) {
+    if (!isCloudId(existing.id)) {
+      // 本地临时项 / 种子项：没有云端 id，改不了库，如实提示
+      Object.assign(existing, data);
+      showDetail(existing);
+      afterMutation();
+      showToast('已保存（此项没有云端 id，仅修改本页显示）');
+      return;
+    }
+    try {
+      const updated = await apiMutate('PATCH', `${API_BASE}/api/items?id=${existing.id}`, payload);
+      Object.assign(existing, apiItemToLocal(updated));  // 用库里返回的最新值回写（含 week 重算、updatedAt）
+      showDetail(existing);
+      afterMutation();
+      showToast('已保存（已同步云端）');
+    } catch (e) {
+      // 越界③：保存失败不动内存、不关表单，让用户改完再试（避免"界面说成功、库里没改"）
+      showToast('保存失败：' + e.message);
+    }
+    return;
+  }
+
+  // ---- 新建 → POST 落库，用云端返回的真实 id 替换本地临时 id ----
+  try {
+    const created = await apiMutate('POST', `${API_BASE}/api/items`, payload);
+    const saved = apiItemToLocal(created);
+    items.push(saved);
+    showDetail(saved);   // 保存后右侧栏立即回显最新内容（修复表单残留）
+    afterMutation();
+    showToast('已新建（已写入云端，id=' + saved.id + '）');
+  } catch (e) {
+    // 越界④：409 重复提交 / 422 时间非法 / 400 缺字段 / 网络异常，都把后端中文提示原样显示
+    showToast('新建失败：' + e.message);
+  }
 }
 
 // ---- 删除确认弹窗（Day 11）：页面内状态机，替代原生 confirm() ----
@@ -948,9 +1047,14 @@ function openDeleteModal(item) {
   if (!overlay || !body) return;
   _delUserCloseLocked = false; // 确认态可关闭
   // 注入「确认」状态
+  // [Day 22] 副提示按"有没有云端 id"分流：云端项会真删库，必须把时间和不可恢复说清楚（后端闸门 E）
+  const _cloud = isCloudId(item.id);
+  const _subText = _cloud
+    ? `将从云端删除，删除后无法恢复（${esc(item.startTime || '')}–${esc(item.endTime || '')}${item.venue ? ' · ' + esc(item.venue) : ''}）`
+    : '此操作仅从本地内存移除（该项没有云端 id，不会删除云端数据）。';
   body.innerHTML =
     `<p class="del-msg">确定要删除「<b>${esc(item.title)}</b>」吗？</p>` +
-    `<p class="del-sub">此操作仅从本地内存移除（尚未接入腾讯文档，不会同步删除云端）。</p>` +
+    `<p class="del-sub">${_subText}</p>` +
     `<div class="del-actions">` +
       `<button id="del-cancel">取消</button>` +
       `<button class="btn-danger" id="del-confirm">删除</button>` +
@@ -984,7 +1088,7 @@ function openDeleteModal(item) {
   overlay.addEventListener('keydown', overlay._keyHandler);
 }
 
-function runDelete(item) {
+async function runDelete(item) {
   const overlay = document.getElementById('delete-modal');
   const body = document.getElementById('delete-body');
   if (!body) return;
@@ -993,26 +1097,60 @@ function runDelete(item) {
   body.innerHTML = `<p class="del-loading"><span class="spinner"></span>正在删除「${esc(item.title)}」…</p>`;
   // 失败分支：?debug=delfail 模拟后端错误
   const fail = new URLSearchParams(location.search).get('debug') === 'delfail';
-  setTimeout(() => {
-    if (fail) {
-      _delUserCloseLocked = false; // 失败态解锁，可取消
-      body.innerHTML =
-        `<p class="del-error del-error-shake">删除失败：网络异常，请稍后重试。</p>` +
-        `<div class="del-actions">` +
-          `<button id="del-cancel">取消</button>` +
-          `<button class="btn-danger" id="del-confirm">重试</button>` +
-        `</div>`;
-      document.getElementById('del-cancel').onclick = () => closeDeleteModal();
-      document.getElementById('del-confirm').onclick = () => runDelete(item);
-    } else {
-      // 成功：移除数据 → 刷新 → 关闭弹窗（卡片可见消失 = 第二个生效信号）
-      deletedIds.add(item.id); // 标记已删，切周重灌种子后也不复活
+
+  // 失败态：真实失败与模拟失败共用同一块 UI，都给「重试」入口（不静默吞错）
+  const showFail = (msg) => {
+    if (!body) return;
+    _delUserCloseLocked = false; // 失败态解锁，可取消
+    body.innerHTML =
+      `<p class="del-error del-error-shake">删除失败：${esc(msg)}</p>` +
+      `<div class="del-actions">` +
+        `<button id="del-cancel">取消</button>` +
+        `<button class="btn-danger" id="del-confirm">重试</button>` +
+      `</div>`;
+    document.getElementById('del-cancel').onclick = () => closeDeleteModal();
+    document.getElementById('del-confirm').onclick = () => runDelete(item);
+  };
+
+  if (fail) { setTimeout(() => showFail('网络异常，请稍后重试。'), 700); return; }
+
+  // 越界⑤：本地临时项 / 种子项没有云端 id，只从本页移除，不打接口
+  if (!isCloudId(item.id)) {
+    setTimeout(() => {
+      deletedIds.add(item.id);
       items = items.filter(x => x.id !== item.id);
       afterMutation(true);
       _delUserCloseLocked = false;
       closeDeleteModal();
+      showToast('已删除（仅本页，云端无此记录）');
+    }, 300);
+    return;
+  }
+
+  // 云端项 → DELETE（必须带 confirm=true，对应后端闸门 A：没确认不许删）
+  try {
+    await apiMutate('DELETE', `${API_BASE}/api/items?id=${item.id}&confirm=true`);
+    // 成功：移除数据 → 刷新 → 关闭弹窗（卡片可见消失 = 第二个生效信号）
+    deletedIds.add(item.id); // 标记已删，切周重灌种子后也不复活
+    items = items.filter(x => x.id !== item.id);
+    afterMutation(true);
+    _delUserCloseLocked = false;
+    closeDeleteModal();
+    showToast('已删除（已从云端移除）');
+  } catch (e) {
+    // 越界⑥：404 = 云端已经没有了（可能别处删过），这不算失败——同步本页即可
+    if (e.code === 404) {
+      deletedIds.add(item.id);
+      items = items.filter(x => x.id !== item.id);
+      afterMutation(true);
+      _delUserCloseLocked = false;
+      closeDeleteModal();
+      showToast('该事项在云端已不存在，已从本页移除');
+      return;
     }
-  }, 700);
+    // 其余（网络异常 / 400 / 500）：留在弹窗里给重试
+    showFail(e.message);
+  }
 }
 
 function closeDeleteModal() {

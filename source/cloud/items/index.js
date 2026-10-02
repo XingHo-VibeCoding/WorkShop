@@ -52,12 +52,22 @@ function getQuery(event = {}) {
 }
 
 function getMethod(event = {}) {
-  return (
+  const raw = (
     event.httpMethod ||
     (event.requestContext && event.requestContext.http && event.requestContext.http.method) ||
     event.method ||
     'GET'
   ).toUpperCase();
+  // 【Day 22】兜底：有些 HTTP 网关只放行 GET/POST，PATCH/DELETE 会被挡在网关层返回 405。
+  // 真遇到这种情况，客户端可以退而用 POST + `?_method=PATCH`（或请求体里带 _method）表达真实意图，
+  // 业务逻辑完全一样，只是进门的方式不同。能直连 PATCH 时这段不会生效。
+  if (raw === 'POST') {
+    const q = getQuery(event);
+    const b = getBody(event);
+    const override = String(q._method || b._method || '').trim().toUpperCase();
+    if (override) return override;
+  }
+  return raw;
 }
 
 function getBody(event = {}) {
@@ -176,6 +186,157 @@ async function createItem(event) {
   return { ok: true, data: result.item, error: null };
 }
 
+// —— 【Day 22】解析要操作的那条记录的 id ——
+// 三种来源都支持，因为不确定 CloudBase 的 HTTP 触发是否会把 /api/items/12 这种带路径参数的请求
+// 路由到 items 函数：① URL 路径末尾的数字 ② ?id=12 ③ 请求体里的 id。哪个先命中用哪个。
+function getItemId(event = {}) {
+  const q = getQuery(event);
+  const body = getBody(event);
+  let raw = (q.id != null && String(q.id).trim() !== '') ? q.id : null;
+  if (raw == null) raw = (body.id != null && String(body.id).trim() !== '') ? body.id : null;
+  if (raw == null) {
+    const p = event.path || event.httpPath || (event.requestContext && event.requestContext.path) || '';
+    const m = /\/(\d+)\s*$/.exec(String(p));
+    if (m) raw = m[1];
+  }
+  if (raw == null) {
+    return { error: { code: 400, message: '缺少 id：请用 /api/items/12、?id=12 或在请求体里带 id' } };
+  }
+  const s = String(raw).trim();
+  // 库里 id 是 SERIAL 整数；前端内存里的临时 id 形如 'u1718...'，必须挡在门外，
+  // 否则会把字符串拼进 id=eq. 过滤条件，既查不到也污染日志。
+  if (!/^\d+$/.test(s)) {
+    return { error: { code: 400, message: `id 无效：${s}（应为正整数；本地未保存的临时事项没有云端 id）` } };
+  }
+  return { id: s };
+}
+
+// —— 【Day 22】PATCH /api/items/:id —— 编辑事项（部分更新）——
+// 契约里的字段名（camelCase）→ 数据库列名（snake_case）；只列允许被改的字段，
+// 不在表里的字段一律忽略（防止客户端塞进 id / createdAt 之类只读字段）。
+const PATCHABLE = {
+  title: 'title',
+  table: 'table_kind',
+  type: 'type',
+  startTime: 'start_time',
+  endTime: 'end_time',
+  ownerKey: 'owner_key',
+  attendees: 'attendees',
+  venue: 'venue',
+  note: 'note',
+  status: 'status',
+};
+const ITEM_STATUS = ['scheduled', 'done', 'cancelled'];
+
+async function patchItem(event) {
+  const t0 = Date.now();
+  const body = getBody(event);
+  console.log('[PATCH /api/items] 收到请求:', JSON.stringify({ ...body, attendees: body.attendees ? '***' : body.attendees }));
+
+  // 1) id
+  const parsed = getItemId(event);
+  if (parsed.error) return { ok: false, data: null, error: parsed.error };
+  const id = parsed.id;
+
+  // 2) 挑出本次真正要改的字段（至少有一个，否则就是空请求）
+  const keys = Object.keys(PATCHABLE).filter((k) => body[k] !== undefined && body[k] !== null);
+  if (!keys.length) {
+    return { ok: false, data: null, error: { code: 400, message: '没有要更新的字段：请至少传一个可改字段（title/table/type/startTime/endTime/ownerKey/attendees/venue/note/status）' } };
+  }
+
+  // 3) 取值校验（只校验本次传了的字段；没传的保持原样）
+  const patch = {};
+  for (const k of keys) {
+    let v = body[k];
+    if (k === 'title') {
+      v = String(v).trim();
+      if (!v) return { ok: false, data: null, error: { code: 400, message: '标题不能为空' } };
+      if (v.length > 100) return { ok: false, data: null, error: { code: 400, message: '标题超长：最多 100 字' } };
+    }
+    if (k === 'table') {
+      v = String(v).trim();
+      if (!TABLE_KINDS.includes(v)) return { ok: false, data: null, error: { code: 400, message: '所属表取值无效：应为 work 或 daily' } };
+    }
+    if (k === 'type') {
+      v = String(v).trim();
+      if (!ITEM_TYPES.includes(v)) return { ok: false, data: null, error: { code: 400, message: `事项类型取值无效：${v}` } };
+    }
+    if (k === 'ownerKey') {
+      v = String(v).trim();
+      if (!OWNER_KEYS.includes(v)) return { ok: false, data: null, error: { code: 400, message: `归属标签取值无效：${v}` } };
+    }
+    if (k === 'status') {
+      v = String(v).trim();
+      if (!ITEM_STATUS.includes(v)) return { ok: false, data: null, error: { code: 400, message: `状态取值无效：${v}（应为 scheduled/done/cancelled）` } };
+    }
+    if (k === 'startTime' || k === 'endTime') {
+      const norm = normalizeTime(v);
+      if (!norm) return { ok: false, data: null, error: { code: 400, message: `${k === 'startTime' ? '开始' : '结束'}时间格式应为 YYYY-MM-DD HH:mm` } };
+      v = norm;
+    }
+    patch[PATCHABLE[k]] = v;
+  }
+
+  // 4) 取原记录：① 判断存在与否 ② 只改一头时间时，要用库里另一头来校验区间
+  const old = await db.findItemById(id);
+  if (!old) return { ok: false, data: null, error: { code: 404, message: `找不到该事项：id=${id}` } };
+
+  const newStart = patch.start_time || old.startTime;   // old.startTime 形如 '2026-09-30 15:00'，比大小够用
+  const newEnd = patch.end_time || old.endTime;
+  if (newEnd < newStart) {
+    // 显示时统一截到分钟（库里原值带秒、新值也带秒，直接拼会让提示一会儿有秒一会儿没秒）
+    const show = (t) => String(t).slice(0, 16);
+    return { ok: false, data: null, error: { code: 422, message: `结束时间须不早于开始时间（改后：开始 ${show(newStart)} / 结束 ${show(newEnd)}）` } };
+  }
+  // 开始时间变了 → ISO 周要跟着重算，否则这条事项会从它所属那一周里"消失"
+  if (patch.start_time) patch.week = getISOWeek(patch.start_time) || old.week;
+
+  // 5) 写入（调 DAL）
+  const result = await db.updateItem(id, patch);
+  if (result.notFound) return { ok: false, data: null, error: { code: 404, message: `找不到该事项：id=${id}` } };
+  if (result.error) return { ok: false, data: null, error: result.error };
+  console.log('[PATCH /api/items] 更新成功 id=', id, '改动字段', Object.keys(patch).join(','), '耗时', Date.now() - t0, 'ms');
+  return { ok: true, data: result.item, error: null };
+}
+
+// —— 【Day 22】DELETE /api/items/:id —— 删除事项（硬删除 + 强制确认）——
+// 清单问「删除为什么比新增更容易出事？你在哪加了确认？」——答：四个地方，逐条对应一种事故：
+//   事故1「误删/连点/脚本重放」→ 闸门A：必须显式带 confirm=true，否则 400 拒绝（新增不需要这种闸门）。
+//   事故2「删错范围」→ 闸门B：id 必填且必须是单个正整数，库侧查询强制 id=eq.X，绝不出现无条件删除。
+//   事故3「删了才发现删错」→ 闸门C：返回被删那一行的快照（title/时间/归属），至少知道删了什么。
+//   事故4「删了不存在的、或重复删」→ 闸门D：一律 404（幂等语义），不报 500、不装作成功。
+// UI 侧还有闸门E：二次确认弹窗（第 ④ 步接线时做）。
+async function removeItem(event) {
+  const t0 = Date.now();
+  const q = getQuery(event);
+  const body = getBody(event);
+  console.log('[DELETE /api/items] 收到请求:', JSON.stringify({ id: q.id || body.id || '(from path)', confirm: q.confirm != null ? q.confirm : body.confirm }));
+
+  // 闸门A：显式确认。缺省 / 传 false / 传别的字符串，一律拒绝。
+  const confirmRaw = q.confirm != null ? q.confirm : body.confirm;
+  const confirmed = confirmRaw === true || String(confirmRaw).trim().toLowerCase() === 'true';
+  if (!confirmed) {
+    return { ok: false, data: null, error: { code: 400, message: '删除需要显式确认：请带 confirm=true（?id=12&confirm=true 或请求体 {"id":12,"confirm":true}）' } };
+  }
+
+  // 闸门B：id 必填且为单个正整数（复用 PATCH 那套解析，本地临时 id 也会被挡）
+  const parsed = getItemId(event);
+  if (parsed.error) return { ok: false, data: null, error: parsed.error };
+  const id = parsed.id;
+
+  // 闸门D：先确认存在，不存在直接 404（顺带拿到快照，供闸门C 用）
+  const old = await db.findItemById(id);
+  if (!old) return { ok: false, data: null, error: { code: 404, message: `找不到该事项：id=${id}（可能已被删除）` } };
+
+  const result = await db.deleteItem(id);
+  if (result.notFound) return { ok: false, data: null, error: { code: 404, message: `找不到该事项：id=${id}（可能已被删除）` } };
+  if (result.error) return { ok: false, data: null, error: result.error };
+
+  console.log('[DELETE /api/items] 删除成功 id=', id, '原标题:', old.title, '耗时', Date.now() - t0, 'ms');
+  // 闸门C：把被删掉的内容原样带回（硬删除下这是唯一的"后悔药线索"）
+  return { ok: true, data: { id: Number(id), deleted: true, item: old }, error: null };
+}
+
 exports.main = async (event = {}) => {
   const method = getMethod(event);
 
@@ -184,12 +345,29 @@ exports.main = async (event = {}) => {
     return {
       statusCode: 204,
       headers: corsHeaders(event, {
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        // 【Day 22】新增 PATCH / DELETE：浏览器发非简单请求前会先看预检结果里允不允许这两个方法
+        'Access-Control-Allow-Methods': 'GET, POST, PATCH, PUT, DELETE, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type',
         'Access-Control-Max-Age': '86400',
       }),
       body: '',
     };
+  }
+
+  // 【Day 22】编辑事项：PATCH（部分更新）为主，PUT 走同一套逻辑（契约登记为 PATCH，PUT 兼容旧写法）
+  if (method === 'PATCH' || method === 'PUT') {
+    try { return http(event, await patchItem(event)); }
+    catch (err) {
+      return http(event, { ok: false, data: null, error: { code: 500, message: err && err.message ? err.message : String(err) } }, 500);
+    }
+  }
+
+  // 【Day 22】删除事项（硬删除 + 强制 confirm）
+  if (method === 'DELETE') {
+    try { return http(event, await removeItem(event)); }
+    catch (err) {
+      return http(event, { ok: false, data: null, error: { code: 500, message: err && err.message ? err.message : String(err) } }, 500);
+    }
   }
 
   if (method === 'POST') {

@@ -128,16 +128,41 @@
 
 ---
 
-### 5. `PUT /api/items/:id`　【📋 占位 · Day 16–20】　编辑事项
-- **请求体**：与 POST 相同结构，但只传要改的字段（部分更新）。
-- **响应 200**：更新后的 item 对象。
-- **错误**：`404` 不存在；`400` 字段非法；`409` 并发冲突（可选）。
+### 5. `PATCH /api/items/:id`　【✅ 已实现 · Day 22】　编辑事项（部分更新）
+- **部署位置**：复用 `items` 云函数（`source/cloud/items/index.js`），HTTP 触发路径 `/api/items`，与 GET/POST 同源；更新走 PostgREST 通道（`PATCH .../items?id=eq.<id>`）。
+- **id 三种来源（任一命中即可）**：`/api/items/12`（路径末尾）· `?id=12` · 请求体里带 `id`。因为不确定网关是否把带路径参数的请求路由到本函数，三条路都留着。
+- **请求体**：与 POST 同名字段，**只传要改的**（不传的保持原样）。可改字段白名单：`title`/`table`/`type`/`startTime`/`endTime`/`ownerKey`/`attendees`/`venue`/`note`/`status`；`id`/`createdAt`/`updatedAt` 为只读，传了也忽略。
+```json
+{ "title": "部门周例会（改）", "startTime": "2026-09-28 14:00" }
+```
+- **🛡️ 改比增更危险的三个点，代码里逐条设防**：
+  - **部分更新要补齐另一头**：只改 `startTime` 时，会取库里原 `endTime` 来校验区间，避免改出「结束早于开始」；改了 `startTime` 会连带重算 `week`，否则这条会从所属周里消失。
+  - **必须带 id 过滤**：PostgREST 的 PATCH 不带过滤条件会**整表更新**，故 `id` 为必填且必须是正整数（本地临时 id 如 `u1718…` 直接 400 挡掉）。
+  - **返回更新后整条**（`Prefer: return=representation`），前端可直接替换内存对象，不必再发一次 GET。
+- **响应 200**：`{ "ok": true, "data": <更新后的 item 对象>, "error": null }`。
+- **错误**：`400` 缺 id / id 非法 / 无有效字段 / 取值非法（中文）；`404` 该 id 不存在（含"已被删掉"的情况）；`422` 时间区间非法（中文，含改后的开始/结束值）；`409` 与已有事项冲突（重复内容或幂等键）；`500` 服务端失败。
+- **方法兼容**：`PUT` 走同一套逻辑（契约以 PATCH 为准，PUT 仅兼容旧写法）；若网关不放行 PATCH/DELETE 返回 405，可用 `POST` + `?_method=PATCH`（或请求体带 `_method`）兜底，业务逻辑完全一致。
 
 ---
 
-### 6. `DELETE /api/items/:id`　【📋 占位 · Day 16–20】　删除事项
-- **响应 200**：`{ "ok": true, "deleted": "<id>" }`。
-- **错误**：`404 { "error": { "code": 404, "message": "item not found" } }`。
+### 6. `DELETE /api/items/:id`　【✅ 已实现 · Day 22】　删除事项（硬删除 + 强制确认）
+- **部署位置**：复用 `items` 云函数，HTTP 触发路径 `/api/items`；删除走 PostgREST 通道（`DELETE .../items?id=eq.<id>`）。id 三种来源同 §三.5。
+- **为什么删除比新增更容易出事，以及四道闸门各自挡什么**：
+  | 闸门 | 挡的事故 | 做法 |
+  |---|---|---|
+  | A 显式确认 | 误删 / 连点 / 脚本重放 | 必须带 `confirm=true`，缺省或不为真 → `400`。新增不需要这道闸，因为它不销毁已有数据 |
+  | B 单条定位 | 删错范围（最严重：不带条件的 DELETE 会**清空整表**） | `id` 必填且必须是单个正整数，库侧强制 `id=eq.<id>`；本地临时 id（`u1718…`）直接 `400` |
+  | C 删除快照 | 删完才发现删错，无从追溯 | 成功时把**被删那一行的完整内容**回传（硬删除下唯一的后悔药线索；真要能一键找回需软删除，属余力加练） |
+  | D 幂等 404 | 删不存在的 / 重复删，被当成服务端故障 | 一律 `404 {message:"找不到该事项：id=X（可能已被删除）"}`，不报 500、也不装作成功 |
+  - 另有 **闸门 E（UI 侧）**：删除前二次确认弹窗，显示标题与时间（第 ④ 步接线时落地）。
+- **请求**：`DELETE /api/items?id=12&confirm=true`，或 body `{"id":12,"confirm":true}`。
+- **响应 200**（统一形状，`data` 承载原 `deleted` 载荷并附快照）：
+```json
+{ "ok": true, "data": { "id": 12, "deleted": true, "item": { "id": 12, "title": "临时碰头", "startTime": "2026-09-30 15:00", "endTime": "2026-09-30 16:00", "ownerKey": "self" } }, "error": null }
+```
+- **错误**：`400` 缺 confirm / 缺 id / id 非法（中文）；`404` 不存在或已删除；`500` 服务端失败。
+- **方法兼容**：若网关不放行 DELETE 返回 405，可用 `POST` + `?_method=DELETE`（或请求体带 `_method`）兜底，逻辑一致。
+- **今日不做**：批量删除、软删除 `is_deleted`（余力加练，未做）。
 
 ---
 
@@ -166,8 +191,8 @@ MVP 三大功能之一（PRD §4）。接收图片或表格文件，调用外部
 | `/api/items` | GET | ✅ 已实现 | Day 17 |
 | `/api/items` | POST | ✅ 已实现 | Day 18 |
 | `/api/items/:id` | GET | 📋 占位 | Day 16–20 |
-| `/api/items/:id` | PUT | 📋 占位 | Day 16–20 |
-| `/api/items/:id` | DELETE | 📋 占位 | Day 16–20 |
+| `/api/items/:id` | PATCH（PUT 兼容） | ✅ 已实现 | Day 22 |
+| `/api/items/:id` | DELETE | ✅ 已实现 | Day 22 |
 | `/api/import` | POST | 📋 占位 | Day 16–20 |
 
 > Day 15 只登记以上契约，**不写任何业务接口代码、不建表、不配跨域**（依清单「今日不做」）。

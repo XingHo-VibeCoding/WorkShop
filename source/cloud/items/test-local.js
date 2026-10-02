@@ -40,6 +40,15 @@ global.fetch = async (url, opts = {}) => {
 
 const handler = require('./index.js');
 
+// 【Day 22 修复】Day 20 起云函数返回 HTTP 完整形态 { statusCode, headers, body }
+// （自定义 CORS 头必须用这种形态才会输出），原脚本直接读 r.ok 会恒为 undefined 而全红。
+// 这里统一把 body 里的 JSON 解出来再断言。
+async function call(evt) {
+  const res = await handler.main(evt);
+  if (res && typeof res.body === 'string') return JSON.parse(res.body);
+  return res;
+}
+
 function assert(cond, msg) {
   if (!cond) { console.error('❌ FAIL:', msg); process.exitCode = 1; }
   else { console.log('✅ PASS:', msg); }
@@ -47,40 +56,40 @@ function assert(cond, msg) {
 
 (async () => {
   // 用例1：缺少必填字段 title → 400 中文
-  let r = await handler.main({ httpMethod: 'POST', body: JSON.stringify({ table: 'work', type: 'meeting', startTime: '2026-09-30 15:00', endTime: '2026-09-30 16:00', ownerKey: 'self' }) });
+  let r = await call({ httpMethod: 'POST', body: JSON.stringify({ table: 'work', type: 'meeting', startTime: '2026-09-30 15:00', endTime: '2026-09-30 16:00', ownerKey: 'self' }) });
   assert(r.ok === false && r.error.code === 400 && r.error.message.includes('标题'), '缺 title → 400 且提示含「标题」: ' + JSON.stringify(r.error));
 
   // 用例2：所属表非法 → 400
-  r = await handler.main({ httpMethod: 'POST', body: JSON.stringify({ title: 'x', table: 'wrong', type: 'meeting', startTime: '2026-09-30 15:00', endTime: '2026-09-30 16:00', ownerKey: 'self' }) });
+  r = await call({ httpMethod: 'POST', body: JSON.stringify({ title: 'x', table: 'wrong', type: 'meeting', startTime: '2026-09-30 15:00', endTime: '2026-09-30 16:00', ownerKey: 'self' }) });
   assert(r.ok === false && r.error.code === 400 && r.error.message.includes('所属表'), 'table 非法 → 400 含「所属表」: ' + JSON.stringify(r.error));
 
   // 用例3：结束早于开始 → 422 中文
-  r = await handler.main({ httpMethod: 'POST', body: JSON.stringify({ title: 'x', table: 'work', type: 'meeting', startTime: '2026-09-30 16:00', endTime: '2026-09-30 15:00', ownerKey: 'self' }) });
+  r = await call({ httpMethod: 'POST', body: JSON.stringify({ title: 'x', table: 'work', type: 'meeting', startTime: '2026-09-30 16:00', endTime: '2026-09-30 15:00', ownerKey: 'self' }) });
   assert(r.ok === false && r.error.code === 422, 'end<start → 422: ' + JSON.stringify(r.error));
 
   // 用例4：正常写入 → ok:true 且 data 含 id/createdAt/updatedAt（camelCase）
   SHOULD_DUP = false;
-  r = await handler.main({ httpMethod: 'POST', body: JSON.stringify({ table: 'work', type: 'meeting', title: '临时碰头', startTime: '2026-09-30 15:00', endTime: '2026-09-30 16:00', attendees: '李工', venue: '线上', note: '', ownerKey: 'self' }) });
+  r = await call({ httpMethod: 'POST', body: JSON.stringify({ table: 'work', type: 'meeting', title: '临时碰头', startTime: '2026-09-30 15:00', endTime: '2026-09-30 16:00', attendees: '李工', venue: '线上', note: '', ownerKey: 'self' }) });
   assert(r.ok === true && r.data && r.data.id === 11 && r.data.createdAt && r.data.updatedAt && r.data.table === 'work' && r.data.ownerKey === 'self', '正常写入 → ok:true + camelCase 新项: ' + JSON.stringify(r.data));
 
   // 用例5：内容重复 → 409 中文
   SHOULD_DUP = true;
-  r = await handler.main({ httpMethod: 'POST', body: JSON.stringify({ table: 'work', type: 'meeting', title: '临时碰头', startTime: '2026-09-30 15:00', endTime: '2026-09-30 16:00', attendees: '李工', venue: '线上', note: '', ownerKey: 'self' }) });
+  r = await call({ httpMethod: 'POST', body: JSON.stringify({ table: 'work', type: 'meeting', title: '临时碰头', startTime: '2026-09-30 15:00', endTime: '2026-09-30 16:00', attendees: '李工', venue: '线上', note: '', ownerKey: 'self' }) });
   assert(r.ok === false && r.error.code === 409 && r.error.message.includes('请勿重复提交'), '重复提交 → 409 含「请勿重复提交」: ' + JSON.stringify(r.error));
   SHOULD_DUP = false;
 
   // 用例6：idempotencyKey 重复（内容不同，但 key 相同）→ 409 中文
   SHOULD_KEY_DUP = true;
-  r = await handler.main({ httpMethod: 'POST', body: JSON.stringify({ table: 'work', type: 'meeting', title: '另一个会', startTime: '2026-10-01 10:00', endTime: '2026-10-01 11:00', ownerKey: 'self', idempotencyKey: 'same-key-001' }) });
+  r = await call({ httpMethod: 'POST', body: JSON.stringify({ table: 'work', type: 'meeting', title: '另一个会', startTime: '2026-10-01 10:00', endTime: '2026-10-01 11:00', ownerKey: 'self', idempotencyKey: 'same-key-001' }) });
   assert(r.ok === false && r.error.code === 409 && r.error.message.includes('请勿重复提交') && r.error.message.includes('idempotencyKey'), 'idempotencyKey 重复 → 409 含「idempotencyKey 重复」: ' + JSON.stringify(r.error));
   SHOULD_KEY_DUP = false;
 
   // 用例7：带 idempotencyKey 首次写入 → ok:true（验证 key 被接受、不误拦）
-  r = await handler.main({ httpMethod: 'POST', body: JSON.stringify({ table: 'work', type: 'meeting', title: '带key的会', startTime: '2026-10-02 14:00', endTime: '2026-10-02 15:00', ownerKey: 'self', idempotencyKey: 'fresh-key-001' }) });
+  r = await call({ httpMethod: 'POST', body: JSON.stringify({ table: 'work', type: 'meeting', title: '带key的会', startTime: '2026-10-02 14:00', endTime: '2026-10-02 15:00', ownerKey: 'self', idempotencyKey: 'fresh-key-001' }) });
   assert(r.ok === true && r.data && r.data.id === 11, '带 idempotencyKey 首次写入 → ok:true: ' + JSON.stringify(r.data));
 
   // 用例8：GET 列表读取 → ok:true 且 data 为数组（验证"查数据库"读路径随 DAL 回归）
-  const rg = await handler.main({ httpMethod: 'GET', queryString: 'table=work' });
+  const rg = await call({ httpMethod: 'GET', queryString: 'table=work' });
   assert(rg.ok === true && Array.isArray(rg.data), 'GET /api/items → ok:true 且 data 为数组: ' + JSON.stringify(rg).slice(0, 120));
 
   console.log('\n本地纯逻辑测试完毕（A+B 双保险 + GET 读路径：8 用例）。');
