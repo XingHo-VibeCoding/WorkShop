@@ -13,6 +13,11 @@
 
 const db = require('./db.js');
 
+// —— 【Day 23】错误提示统一层 ——
+// 任何意外异常在离开云函数前，都先过这里：翻成一句中文人话给用户，英文原文只写进日志。
+// 分类规则与文案都在 errors.js 里，本文件只负责"接上"。
+const { toUserError, logError } = require('./errors.js');
+
 // —— 【Day 20 · CORS 配置】——
 // 浏览器跨域调用本接口时，响应必须带 Access-Control-Allow-Origin，否则被浏览器拦截。
 // 白名单只放行：生产静态托管域名 + 本地调试端口，禁止 * 通配符（Day 20 清单硬性要求）。
@@ -337,7 +342,8 @@ async function removeItem(event) {
   return { ok: true, data: { id: Number(id), deleted: true, item: old }, error: null };
 }
 
-exports.main = async (event = {}) => {
+// 真正的业务分发（原 exports.main 的本体）。外面再包一层，只为记一行请求日志。
+async function handle(event = {}) {
   const method = getMethod(event);
 
   // 【Day 20】OPTIONS 预检：POST JSON 会先发预检请求，必须在业务处理前接住
@@ -358,7 +364,10 @@ exports.main = async (event = {}) => {
   if (method === 'PATCH' || method === 'PUT') {
     try { return http(event, await patchItem(event)); }
     catch (err) {
-      return http(event, { ok: false, data: null, error: { code: 500, message: err && err.message ? err.message : String(err) } }, 500);
+      // 【Day 23】改前：把 err.message 原样丢给前端（英文裸报错）；改后：原文进日志，中文出站
+      logError('PATCH /api/items', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
     }
   }
 
@@ -366,14 +375,18 @@ exports.main = async (event = {}) => {
   if (method === 'DELETE') {
     try { return http(event, await removeItem(event)); }
     catch (err) {
-      return http(event, { ok: false, data: null, error: { code: 500, message: err && err.message ? err.message : String(err) } }, 500);
+      logError('DELETE /api/items', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
     }
   }
 
   if (method === 'POST') {
     try { return http(event, await createItem(event)); }
     catch (err) {
-      return http(event, { ok: false, data: null, error: { code: 500, message: err && err.message ? err.message : String(err) } }, 500);
+      logError('POST /api/items', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
     }
   }
   // 默认 GET：列表读取（调 DAL）
@@ -382,13 +395,33 @@ exports.main = async (event = {}) => {
     const data = await db.queryItems(q);
     return http(event, { ok: true, data, error: null });
   } catch (err) {
-    return http(event, {
-      ok: false,
-      data: null,
-      error: {
-        code: 500,
-        message: err && err.message ? err.message : String(err),
-      },
-    }, 500);
+    logError('GET /api/items', err);
+    const e = toUserError(err);
+    return http(event, { ok: false, data: null, error: e }, e.code);
   }
+}
+
+// —— 【Day 23 · 余力加练】请求日志 ——
+// 每条请求打一行：时间 / 方法 / 路径 / 结果状态码 / 耗时。
+// 为什么要有：前面把英文报错收进日志了，日志里得能看到"谁在什么时间、请求了什么、结果如何"，
+// 否则事后排查只剩一堆孤立的错误信息，串不成线。
+// 时间格式按项目约定 YYYY-MM-DD HH:mm:ss、东八区（AGENTS.md §十.2），不写 next Mon 之类歧义写法。
+function nowStamp() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+function reqPath(event = {}) {
+  return event.path || event.httpPath || (event.requestContext && event.requestContext.path) || '/';
+}
+
+exports.main = async (event = {}) => {
+  const t0 = Date.now();
+  const method = getMethod(event);
+  const p = reqPath(event);
+  const res = await handle(event);
+  console.log(`[请求日志] ${nowStamp()} ${method} ${p} → ${res.statusCode} (${Date.now() - t0}ms)`);
+  return res;
 };

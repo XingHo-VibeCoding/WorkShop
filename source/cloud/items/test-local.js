@@ -5,8 +5,10 @@
 // 运行：node test-local.js   （Node 18+，自带 fetch；此处会被本脚本覆盖）
 'use strict';
 
-// 1) 用测试密钥，让 getBearer() 直接返回，不再发起匿名登录网络请求
-process.env.CB_API_KEY = 'test-key';
+// 1) 【Day 23】测试用的"密钥"不再写死在代码里：优先读环境变量，读不到就用本地占位值。
+//    占位值只是为了让 getBearer() 短路、不发匿名登录请求，本身不是密钥（也不含任何密钥特征）。
+//    真实密钥永远只放环境变量 CB_API_KEY，键名清单见仓库根目录 .env.example。
+process.env.CB_API_KEY = process.env.CB_API_KEY || 'local';
 
 // 2) mock PostgREST
 let SHOULD_DUP = false; // 控制去重查询是否命中
