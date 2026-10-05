@@ -1,8 +1,9 @@
 # WorkShop 会议工作台
 
-> 排会议、理行程、管日程的工作台。当前进度：**Day 25**（前端静态页 + CloudBase 云函数真实后端 + 数据库）。
+> 排会议、理行程、管日程的工作台。当前进度：**Day 26**（**v1.0 已发布** + 完成一次真实回滚演练）。
 > 完整文档：产品需求见 [`PRD.md`](PRD.md)、接口契约见 [`api-contract.md`](api-contract.md)、
-> 本地运行见 [`RUN.md`](RUN.md)、部署见 [`DEPLOY.md`](DEPLOY.md)、云端资产见 [`CLOUD_ASSETS.md`](CLOUD_ASSETS.md)。
+> 本地运行见 [`RUN.md`](RUN.md)、部署见 [`DEPLOY.md`](DEPLOY.md)、**出事要回滚见 [`ROLLBACK.md`](ROLLBACK.md)**、
+> 云端资产见 [`CLOUD_ASSETS.md`](CLOUD_ASSETS.md)。
 
 ---
 
@@ -91,6 +92,10 @@ node resource/scripts/verify-project.js --only=V3,V5
 |---|---|
 | 前端页面 | https://workshop-workshop-d4g02a7z81ff51a63.webapps.tcloudbase.com/ |
 | 接口基址 | https://workshop-d4g02a7z81ff51a63-1d496602788.ap-shanghai.app.tcloudbase.com |
+
+> **页面左上角有 `v1.0` 标签**（Day 26 加），一眼能确认线上跑的是哪一版。
+> 真出事要回滚：**先看 [`ROLLBACK.md`](ROLLBACK.md) §7 判断表**，别凭直觉回滚 —— 回滚的代价是约 1 分钟全站中断。
+> 推荐路径是 CLI 一条命令（实测 5.6 秒），控制台手动上传约 1.5–4 分钟。
 
 ## 开发约定
 

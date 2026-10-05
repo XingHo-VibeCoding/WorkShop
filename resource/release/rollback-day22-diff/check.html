@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WorkShop 检查台</title>
+  <link rel="stylesheet" href="css/base.css">
+  <style>
+    /* 检查台专属轻样式：卡片化三区块，复用全局变量 */
+    body { font-family: var(--font-sans, system-ui, sans-serif); margin: 0; background: var(--bg, #f5f6fa); color: var(--ink, #1c2333); }
+    .wrap { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
+    .topbar-check { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+    .brand { font-weight: 700; font-size: 20px; }
+    .brand-sub { font-size: 13px; color: var(--ink-soft, #6b7280); }
+    .back-link { margin-left: auto; font-size: 13px; }
+    .meta-line { font-size: 12px; color: var(--ink-soft, #6b7280); margin-bottom: 20px; }
+    .card { background: #fff; border: 1px solid var(--line, #e5e7eb); border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(16,24,40,.06); }
+    .card h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #9ca3af; display: inline-block; }
+    .dot.ok { background: #16a34a; } .dot.bad { background: #dc2626; }
+    button.primary { background: var(--accent, #2f6fed); color: #fff; border: 0; border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; }
+    button.primary:disabled { opacity: .55; cursor: wait; }
+    pre.out { background: #0f1116; color: #d7dae0; font-size: 12px; padding: 10px 12px; border-radius: 8px; overflow: auto; max-height: 220px; margin: 10px 0 0; }
+    table.items { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+    table.items th, table.items td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line, #e5e7eb); }
+    table.items th { color: var(--ink-soft, #6b7280); font-weight: 600; font-size: 12px; }
+    .tag { display: inline-block; padding: 1px 8px; border-radius: 99px; color: #fff; font-size: 11px; }
+    .hint { font-size: 12px; color: var(--ink-soft, #6b7280); margin-top: 8px; }
+    .stamp { font-size: 12px; color: var(--ink-soft, #6b7280); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar-check">
+      <span class="brand">WorkShop <span class="brand-sub">检查台 · Day 20</span></span>
+      <a class="back-link" href="index.html">← 返回工作台</a>
+    </div>
+    <div class="meta-line">接口基址：<code id="api-base">—</code>　|　页面打开于 <span id="opened-at">—</span></div>
+
+    <!-- 区块 1：健康检查 -->
+    <div class="card">
+      <h2><span class="dot" id="dot-health"></span>① 健康检查 <span class="stamp" id="health-at"></span></h2>
+      <button class="primary" id="btn-health">重新检查</button>
+      <pre class="out" id="out-health">等待检查…</pre>
+    </div>
+
+    <!-- 区块 2：核心表真实数据 -->
+    <div class="card">
+      <h2><span class="dot" id="dot-items"></span>② items 表真实数据（本周） <span class="stamp" id="items-at"></span></h2>
+      <button class="primary" id="btn-items">刷新数据</button>
+      <div id="items-summary" class="hint"></div>
+      <div id="items-box"><pre class="out">等待加载…</pre></div>
+      <div class="hint">「最后更新时间」即上方最近一次成功拉取数据的时刻：<b id="last-updated">—</b></div>
+    </div>
+
+    <!-- 区块 3：写入测试 -->
+    <div class="card">
+      <h2><span class="dot" id="dot-write"></span>③ 写入测试（POST → GET 读回）</h2>
+      <button class="primary" id="btn-write">执行一次写入测试</button>
+      <pre class="out" id="out-write">尚未执行。每次点击生成随机标题的会议并写入数据库，随后读回验证。</pre>
+      <div class="hint">⚠️ 写入的是真实数据（标题带「写入测试」前缀 + 时间戳，写入当天），可在工作台时间线上看到；本项目暂无删除接口，重复点击会产生多条。</div>
+    </div>
+  </div>
+
+  <script>
+    // 公网 API 基址（无密钥：items 路由为免鉴权公开接口，密钥只存在于云函数环境变量）
+    const API_BASE = 'https://workshop-d4g02a7z81ff51a63-1d496602788.ap-shanghai.app.tcloudbase.com';
+    document.getElementById('api-base').textContent = API_BASE;
+    document.getElementById('opened-at').textContent = fmtNow();
+
+    function fmtNow() { const d = new Date(); const p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; }
+    function setDot(id, ok) { const el = document.getElementById(id); el.className = 'dot ' + (ok ? 'ok' : 'bad'); }
+    const $ = id => document.getElementById(id);
+
+    // ---- ① 健康检查 ----
+    async function checkHealth() {
+      $('out-health').textContent = '检查中…';
+      try {
+        const r = await fetch(API_BASE + '/api/health');
+        const j = await r.json();
+        setDot('dot-health', j.ok);
+        $('out-health').textContent = 'HTTP ' + r.status + '\n' + JSON.stringify(j, null, 2);
+        $('health-at').textContent = '· ' + fmtNow();
+      } catch (e) {
+        setDot('dot-health', false);
+        $('out-health').textContent = '请求失败：' + e.message;
+      }
+    }
+
+    // ---- ② items 真实数据（本周） ----
+    function weekRange() {
+      const d = new Date(); const mon = (d.getDay() + 6) % 7;
+      d.setDate(d.getDate() - mon); d.setHours(0, 0, 0, 0);
+      const end = new Date(d); end.setDate(end.getDate() + 6); end.setHours(23, 59, 59);
+      const f = x => `${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,'0')}-${String(x.getDate()).padStart(2,'0')} ${String(x.getHours()).padStart(2,'0')}:${String(x.getMinutes()).padStart(2,'0')}`;
+      return { start: f(d), end: f(end) };
+    }
+    const TYPE_C = { meeting: '#2f6fed', class: '#7c3aed', trip: '#0e9f8a', sport: '#e08e0b', life: '#db2777', other: '#6b7280' };
+    const TYPE_L = { meeting: '会议', class: '课表', trip: '行程', sport: '运动', life: '生活', other: '其他' };
+
+    async function loadItems() {
+      $('items-box').innerHTML = '<pre class="out">加载中…</pre>';
+      const { start, end } = weekRange();
+      try {
+        const r = await fetch(`${API_BASE}/api/items?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
+        const j = await r.json();
+        setDot('dot-items', !!j.ok);
+        if (!j.ok) throw new Error(j.error && j.error.message || ('HTTP ' + r.status));
+        const list = j.data || [];
+        $('items-summary').textContent = `共 ${list.length} 条（${start.slice(0,10)} ~ ${end.slice(0,10)}）`;
+        const rows = list.map(it => `<tr>
+          <td>${it.id}</td>
+          <td><span class="tag" style="background:${TYPE_C[it.type] || TYPE_C.other}">${TYPE_L[it.type] || it.type}</span></td>
+          <td>${it.table === 'work' ? '工作' : '日常'}</td>
+          <td><b>${String(it.title).replace(/</g, '&lt;')}</b></td>
+          <td>${it.startTime}<br>${it.endTime}</td>
+          <td>${it.ownerKey || ''}</td>
+        </tr>`).join('');
+        $('items-box').innerHTML = `<table class="items">
+          <tr><th>ID</th><th>类型</th><th>表</th><th>标题</th><th>开始/结束</th><th>归属</th></tr>${rows}</table>`;
+        const now = fmtNow();
+        $('items-at').textContent = '· ' + now;
+        $('last-updated').textContent = now;   // 余力加练：最后更新时间
+      } catch (e) {
+        setDot('dot-items', false);
+        $('items-box').innerHTML = `<pre class="out">加载失败：${e.message}</pre>`;
+      }
+    }
+
+    // ---- ③ 写入测试：POST 随机会议 → GET 读回验证 ----
+    async function writeTest() {
+      const btn = $('btn-write'); btn.disabled = true;
+      $('dot-write').className = 'dot';
+      $('out-write').textContent = '执行中…';
+      const d = new Date(); const p = n => String(n).padStart(2, '0');
+      const sT = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+      d.setMinutes(d.getMinutes() + 30);
+      const eT = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+      const body = {
+        table: 'work', type: 'meeting',
+        title: `写入测试-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}-${Math.random().toString(36).slice(2, 6)}`,
+        startTime: sT, endTime: eT,
+        attendees: '检查台', venue: '线上', note: 'Day 20 检查台写入测试',
+        ownerKey: 'self',
+        idempotencyKey: 'check-' + Date.now(),   // 每次点击唯一，幂等键兜底
+      };
+      try {
+        const t0 = performance.now();
+        const r = await fetch(API_BASE + '/api/items', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const j = await r.json();
+        const ms = Math.round(performance.now() - t0);
+        if (!j.ok) throw new Error(j.error && j.error.message || ('HTTP ' + r.status));
+        const newId = j.data && j.data.id;
+        // 读回：拉当天数据确认新 ID 在列表里
+        const q = await fetch(`${API_BASE}/api/items?start=${encodeURIComponent(sT.slice(0,10) + ' 00:00')}&end=${encodeURIComponent(sT.slice(0,10) + ' 23:59')}`);
+        const qj = await q.json();
+        const found = (qj.data || []).some(it => String(it.id) === String(newId));
+        setDot('dot-write', found);
+        $('out-write').textContent =
+          `POST HTTP ${r.status}（${ms}ms）\n写入：${body.title}\n返回 ID：${newId}\n` +
+          `读回验证：${found ? '✅ 新 ID 已出现在当天列表' : '❌ 读回未见新 ID'}\n\n` +
+          JSON.stringify(j, null, 2);
+      } catch (e) {
+        setDot('dot-write', false);
+        $('out-write').textContent = '写入失败：' + e.message + '\n（若为跨域问题，F12 → Network 看该请求的响应头）';
+      } finally { btn.disabled = false; }
+    }
+
+    $('btn-health').addEventListener('click', checkHealth);
+    $('btn-items').addEventListener('click', loadItems);
+    $('btn-write').addEventListener('click', writeTest);
+    checkHealth(); loadItems();   // 打开页面自动跑 ①②
+  </script>
+</body>
+</html>

@@ -20,6 +20,10 @@ resource/screenshots/
 resource/shots/
 resource/before_demo/
 
+# 静态托管上传目录（Day 26）：固定名 workshop，每次由 prepare-release.js 重建，
+# 内容随目标版本切换，属于临时产物 → 不进仓库（发布包 v1.0 / rollback-day22 才进仓库留痕）
+resource/release/workshop/
+
 # resource 整理后的历史散文件（Day 10-11 诊断/截图/笔记输出，只本地留）
 resource/logs/
 resource/data/
