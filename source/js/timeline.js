@@ -727,8 +727,9 @@ function render() {
       card.style.width = 'auto';
       body.appendChild(card);
 
-      // 角标：组内有多个日程才显示（紧贴锚点卡上方）
-      if (group.items.length > 1) {
+      // 角标：组内有多个日程才显示（紧贴锚点卡上方）；移动端为避免压住上方卡片标题，
+      // 改用「卡片描边 + ⚠ 标记 + 点按展开弹窗」表达重叠，隐藏浮动角标（角标逻辑见下方，仅桌面端渲染）
+      if (!isMobile() && group.items.length > 1) {
         const badge = document.createElement('div');
         badge.className = 'overlap-badge' + (hasOv ? ' ' + ovClass : '');
         const labels = group.items.map(g => {
@@ -783,23 +784,131 @@ function render() {
     : atMax ? `⚠ 已到最晚可查看周（往后最多 ${WEEK_MAX} 周）` : '';
 }
 
-// ---- [Day 20 修复] 关闭移动端详情抽屉 ----
-/* closeDetailDrawer 在 Day 14 就被 showDetail(null) 引用，但函数体一直没写（潜伏 bug）：
-   mock 时代每周都有种子数据，此分支永远跑不到；Day 20 接真实数据库后空周必触发，
-   ReferenceError 被 bootstrap 的 catch 接住 → 整页误报「加载失败」。
-   行为按 base.css 的移动端抽屉契约实现：移除 .open 收起底部抽屉与遮罩；桌面端无该类，安全空操作。 */
-function closeDetailDrawer() {
-  const d = document.getElementById('detail');
-  if (d) d.classList.remove('open');
-  const scrim = document.querySelector('.detail-scrim');
-  if (scrim) scrim.classList.remove('open');
+// 移动端判定：与 base.css 的 @media (max-width: 768px) 断点保持一致
+function isMobile() {
+  return !!(window.matchMedia && window.matchMedia('(max-width: 768px)').matches);
+}
+
+// ---- [Day 25 重写] 移动端副栏可拖动底部抽屉：class 驱动三态，根除 isMobile 守卫导致的全屏卡死 ----
+/* 三态由 CSS class 定义（.sheet-open=半屏 / .sheet-expanded=全屏 / .sheet-collapsed=仅手柄条），
+   JS 只切 class，不读 offsetHeight 算像素；拖拽时临时用内联 transform 跟手，松手吸附回 class。
+   打开无条件以半屏(peek)落地 → 主栏始终可见；桌面端这些 class 在媒体查询外无意义，安全空操作。 */
+let _scrimBound = false;
+let sheetState = 'closed';   // 'closed' | 'peek' | 'expanded' | 'collapsed'
+const SHEET_HANDLE_H = 44;
+
+function sheetEl() { return document.getElementById('detail'); }
+function scrimEl() { return document.querySelector('.detail-scrim'); }
+
+function setSheetState(state) {
+  const d = sheetEl();
+  if (!d) return;
+  sheetState = state;
+  d.style.transition = 'transform .25s ease';
+  d.style.transform = '';                                  // 清除拖拽残留的内联像素，交还 CSS class 控制
+  d.classList.remove('sheet-open', 'sheet-expanded', 'sheet-collapsed');
+  const s = scrimEl();
+  if (state === 'closed') { if (s) s.classList.remove('open'); return; }
+  // peek→sheet-open，expanded→sheet-expanded，collapsed→sheet-collapsed
+  d.classList.add(state === 'peek' ? 'sheet-open' : 'sheet-' + state);
+  if (s) { if (state === 'expanded') s.classList.add('open'); else s.classList.remove('open'); }
+}
+
+function closeDetailDrawer() { setSheetState('closed'); }
+
+function openDetailDrawer() {
+  const s = scrimEl();
+  if (s && !_scrimBound) {
+    s.addEventListener('click', () => closeDetailDrawer());  // expanded 态遮罩可点收起
+    _scrimBound = true;
+  }
+  // 无条件以半屏(peek)打开：不依赖 isMobile() 判定，绝不卡在全屏
+  const d = sheetEl();
+  if (d) setSheetState('peek');
+}
+
+// [Day 25] 拖动交互：在 .sheet-handle 上 pointerdown 起拖，move/up 挂到 window（手指离开手柄也跟手）；
+// 松手吸附到最近态；下拖过 collapsed 阈值 → 完全关闭。点按手柄在 collapsed→peek→expanded→peek 间循环切换。
+function initSheetDrag() {
+  const handle = document.getElementById('sheet-handle');
+  const d = sheetEl();
+  if (!handle || !d) return;
+
+  // 三态像素基准（基于当前渲染高度；expanded=0 顶, peek=45vh 露出, collapsed=仅手柄条）
+  const bounds = () => {
+    const h = Math.round(d.getBoundingClientRect().height) || window.innerHeight;
+    const peekY = Math.max(0, h - Math.round(window.innerHeight * 0.45));
+    return { expanded: 0, peek: peekY, collapsed: h - SHEET_HANDLE_H, max: h + 60 };
+  };
+  const currentT = () => {
+    const m = /translateY\(([-0-9.]+)px\)/.exec(d.style.transform || '');
+    if (m) return parseFloat(m[1]);
+    if (sheetState === 'expanded') return 0;
+    return bounds()[sheetState] || 0;
+  };
+
+  let dragging = false, startY = 0, startT = 0, moved = false;
+
+  const onDown = (e) => {
+    if (!isMobile()) return;
+    dragging = true; moved = false;
+    startY = e.clientY; startT = currentT();
+    d.style.transition = 'none';
+    try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+  };
+  const onMove = (e) => {
+    if (!dragging) return;
+    const dy = e.clientY - startY;
+    if (Math.abs(dy) > 4) moved = true;
+    const b = bounds();
+    const t = Math.max(b.expanded, Math.min(startT + dy, b.max)); // 上不超 expanded，下允许略过 collapsed 触发关闭
+    d.style.transform = `translateY(${t}px)`;
+    if (e.cancelable) e.preventDefault();
+  };
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    const b = bounds(); const t = currentT();
+    if (t > b.collapsed + 40) { setSheetState('closed'); return; }  // 下拉过手柄阈值 → 关闭
+    const dist = { expanded: Math.abs(t - b.expanded), peek: Math.abs(t - b.peek), collapsed: Math.abs(t - b.collapsed) };
+    let best = 'expanded', bv = Infinity;
+    for (const k in dist) if (dist[k] < bv) { bv = dist[k]; best = k; }
+    setSheetState(best);
+  };
+  const onClick = () => {
+    if (!isMobile() || moved) return;
+    if (sheetState === 'collapsed') setSheetState('peek');
+    else if (sheetState === 'peek') setSheetState('expanded');
+    else setSheetState('peek');
+  };
+  const onKey = (e) => {
+    if (!isMobile()) return;
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); }
+  };
+
+  handle.addEventListener('pointerdown', onDown);
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', onUp);
+  handle.addEventListener('click', onClick);
+  handle.addEventListener('keydown', onKey);
+  // 转屏/尺寸变化时重新吸附到当前态，避免位置错乱
+  window.addEventListener('resize', () => { if (sheetState !== 'closed' && isMobile()) setSheetState(sheetState); });
+
+  // [无关闭叉方案] 点时间线空白区（非日程卡）收起副栏，作为「点空地取消」的退路
+  const tl = document.getElementById('timeline');
+  if (tl) tl.addEventListener('click', (e) => {
+    if (!isMobile() || sheetState === 'expanded') return; // 全屏态靠遮罩关闭；点卡片=切换详情不关闭
+    if (e.target.closest('.item')) return;
+    closeDetailDrawer();
+  });
 }
 
 function showDetail(item) {
   currentItem = item || null;
-  const d = document.getElementById('detail');
+  const body = document.getElementById('detail-body');
   if (!item) {
-    d.innerHTML = `<p class="detail-empty">点击时间线上的事项查看详情，或点「+ 新建」添加。底部可切换工作/日常/总表。</p>${legendHTML()}`;
+    body.innerHTML = `<p class="detail-empty">点击时间线上的事项查看详情，或点「+ 新建」添加。底部可切换工作/日常/总表。</p>${legendHTML()}`;
     closeDetailDrawer();
     return;
   }
@@ -808,7 +917,7 @@ function showDetail(item) {
   const ownerHTML = currentMode === 'all'
     ? `<span class="owner-mark">${markHTML(m)} ${esc(m.name)}</span>`
     : `<span class="owner-mark">${markHTML(m)} ${esc(m.name)}</span>`;
-  d.innerHTML = `
+  body.innerHTML = `
     <div class="detail-card">
       <h3>${esc(item.title)}</h3>
       <p class="row">
@@ -828,6 +937,7 @@ function showDetail(item) {
     ${legendHTML()}`;
   document.getElementById('btn-edit').addEventListener('click', () => renderForm(item));
   document.getElementById('btn-delete').addEventListener('click', () => deleteItem(item.id));
+  openDetailDrawer(); // 移动端滑出底部抽屉（桌面端 .open 为空操作）
 }
 
 function renderForm(existing) {
@@ -844,7 +954,7 @@ function renderForm(existing) {
   const modeOpts = formModes.map(m => `<option value="${m.key}" ${m.key === tbl ? 'selected' : ''}>${m.label}</option>`).join('');
   const ownerOpts = OWNERS.filter(o => o.key !== 'me').map(o => `<option value="${o.key}" ${existing && existing.ownerKey === o.key ? 'selected' : ''}>${o.mark} ${esc(o.name)}</option>`).join('');
 
-  const d = document.getElementById('detail');
+  const d = document.getElementById('detail-body');
   d.innerHTML = `
     <div class="detail-card">
       <h3>${isEdit ? '编辑事项' : '新建事项'}</h3>
@@ -870,9 +980,11 @@ function renderForm(existing) {
           <label>区间结束日（可选）<input type="date" name="endDate" id="f-enddate"></label>
           <p class="range-preview" id="range-preview"></p>
         </div>
+        <!-- [Day 24] 时间改为拨轮选择：只读输入框 + 点击弹出双列拨轮（时/分，5 分钟一档），
+             不再手打 HH:mm，格式由 timepicker.js 保证；结束时间跟随开始自动平移 -->
         <div class="row2">
-          <label>开始<input name="startTime" value="${isEdit ? existing.startTime : '09:00'}" placeholder="HH:mm"></label>
-          <label>结束<input name="endTime" value="${isEdit ? existing.endTime : '10:00'}" placeholder="HH:mm"></label>
+          <label>开始<span class="tp-field"><input name="startTime" value="${isEdit ? existing.startTime : '09:00'}" aria-label="开始时间"><span class="tp-caret" aria-hidden="true">▾</span></span></label>
+          <label>结束<span class="tp-field"><input name="endTime" value="${isEdit ? existing.endTime : '09:30'}" aria-label="结束时间"><span class="tp-caret" aria-hidden="true">▾</span></span></label>
         </div>
         <label>参与人<input name="attendees" value="${isEdit ? esc(existing.attendees) : ''}"></label>
         <label>场地<input name="venue" value="${isEdit ? esc(existing.venue) : ''}"></label>
@@ -919,8 +1031,14 @@ function renderForm(existing) {
   if (fEnd) fEnd.addEventListener('input', updateRangePreview);
   if (fDay) fDay.addEventListener('change', updateRangePreview);
 
+  // [Day 24] 时间拨轮接线：两个只读输入框成对绑定，点谁弹谁
+  if (window.TimePicker) {
+    TimePicker.bindPair(f.querySelector('[name="startTime"]'), f.querySelector('[name="endTime"]'));
+  }
+
   document.getElementById('item-form').addEventListener('submit', e => { e.preventDefault(); saveItem(existing); });
   document.getElementById('btn-cancel').addEventListener('click', () => showDetail(existing || null));
+  openDetailDrawer(); // 移动端滑出底部抽屉（新建/编辑表单同样需要）
 }
 
 function typeOptionsHTML(table, selected) {
@@ -960,8 +1078,9 @@ async function saveItem(existing) {
 
   // ---- 越界①/②：前端先挡一道，后端还有 400/422 兜底（双保险，省一次往返）----
   if (!data.title) { showToast('请填写标题'); return; }
-  if (data.startTime && data.endTime && data.endTime < data.startTime) {
-    showToast('结束时间不能早于开始时间'); return;
+  // [Day 24 契约变更] 禁止零时长：结束须「晚于」开始，等于也不行（与后端 422 同一口径）
+  if (data.startTime && data.endTime && data.endTime <= data.startTime) {
+    showToast('结束时间须晚于开始时间（不允许零时长）'); return;
   }
 
   // [板块B] 区间批量插入（仅新建、且选了重复规则 + 结束日）：把长期日程展开成多条
@@ -1287,6 +1406,7 @@ async function bootstrap() {
 // 首次启动按默认视图定位表签
 currentMode = defaultStartMode;
 activateModeTab(currentMode);
+initSheetDrag();   // [Day 25] 绑定移动端副栏拖动手柄（桌面端内部 isMobile 守卫，空操作）
 bootstrap();
 
 // =================== [Day 9] 设置系统（实装） ===================

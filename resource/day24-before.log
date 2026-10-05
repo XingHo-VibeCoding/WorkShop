@@ -1,0 +1,48 @@
+# Day 24 核心流程测试 · 轮次=before · 时间=2026-10-04 13:19:00
+# API_BASE=https://workshop-d4g02a7z81ff51a63-1d496602788.ap-shanghai.app.tcloudbase.com
+
+--- T2 读取：GET /api/items（本周范围）---
+    HTTP 200（1970ms） {"ok":true,"data":[{"id":5,"title":"高等数学(二)","type":"course","table":"work","startTime":"2026-09-28 08:00","endTime":"2026-09-28 09:40","week":"2026-W39","atten
+✅ [T2] 读取本周数据：HTTP 200，data 条数=11
+
+--- T3 写入：POST /api/items ---
+    请求体={"table":"work","type":"meeting","title":"Day24-before-ywez","startTime":"2026-10-04 14:19","endTime":"2026-10-04 14:49","attendees":"脚本","venue":"线上","note":"Day 24 before 测试","ownerKey":"self","idempotencyKey":"day24-before-1791091142252"}
+    HTTP 200（769ms） {"ok":true,"data":{"id":26,"title":"Day24-before-ywez","type":"meeting","table":"work","startTime":"2026-10-04 14:19","endTime":"2026-10-04 14:49","week":"2026-W40","attendees":"脚本","venue":"线上","equi
+✅ [T3] 写入返回 id=26（HTTP 200）
+
+--- T4 刷新确认：GET 同一天，找新 id ---
+✅ [T4] 读回：找到「Day24-before-ywez」2026-10-04 14:19~2026-10-04 14:49
+
+--- T5 修改：PATCH /api/items?id=<id>（改标题）---
+    HTTP 200（190ms） {"ok":true,"data":{"id":26,"title":"Day24-before-ywez-改","type":"meeting","table":"work","startTime":"2026-10-04 14:19","endTime":"2026-10-04 14:49","week":"2026-W40","attendees":"脚本","venue":"线上","eq
+✅ [T5] 改标题后读回：「Day24-before-ywez-改」（HTTP 200）
+
+--- E8 刁钻：PATCH 只改 startTime = 原 endTime（零时长）---
+    HTTP 200（115ms） {"ok":false,"data":null,"error":{"code":422,"message":"结束时间须不早于开始时间（改后：开始 2026-10-04 14:49 / 结束 2026-10-04 14:49）"}}
+❌ [E8] 零时长修改（开始=结束=2026-10-04 14:49）：契约允许 end==start，实际 HTTP 200 / code 422｜结束时间须不早于开始时间（改后：开始 2026-10-04 14:49 / 结束 2026-10-04 14:49）
+
+--- T6 删除：DELETE /api/items?id=<id>&confirm=true ---
+    HTTP 200（140ms） {"ok":true,"data":{"id":26,"deleted":true,"item":{"id":26,"title":"Day24-before-ywez-改","type":"meeting","table":"work","startTime":"2026-10-04 14:19","endTime":"2026-10-04 14:49","week":"2026-W40","a
+✅ [T6] 删除后读回：已消失（HTTP 200）
+
+--- E 系列：刁钻输入 ---
+    E1 空标题 → HTTP 200 / body code 400 · 缺少必填字段：标题
+✅ [E1] 空标题：body code 应为 400，实际 400
+❌ [B1] ★错误响应 HTTP 状态应为 4xx（契约 §一：错误响应 HTTP 4xx/5xx），实际 HTTP 200
+    E2 500字标题 → HTTP 200 / body code 400 · 写入 items 失败：value too long for type character varying(200)
+✅ [E2] 超长标题：body code 应为 400/422 且提示中文，实际 400
+    E3 第 1 次 → HTTP 200 / body code 200 · {"ok":true,"data":{"id":27,"title":"Day24-before-dup-1l3u","
+    E3 第 2 次 → HTTP 200 / body code 409 · 请勿重复提交：该事项已存在
+    E3 第 3 次 → HTTP 200 / body code 409 · 请勿重复提交：该事项已存在
+✅ [E3] 连点三次 body code 200/409/409（期望 200/409/409）
+    E4 结束早于开始 → HTTP 200 / body code 422 · 结束时间须不早于开始时间
+✅ [E4] 非法区间：body code 应 422，实际 422
+    E5 非法 id → HTTP 200 / body code 400 · id 无效：u1718abc（应为正整数；本地未保存的临时事项没有云端 id）
+✅ [E5] 非法 id：body code 应 400，实际 400
+    E6 不带 confirm → HTTP 200 / body code 400 · 删除需要显式确认：请带 confirm=true（?id=12&confirm=true 或请求体 {"id":12,"confirm":true}）
+✅ [E6] 缺 confirm：body code 应 400，实际 400
+    E7 删已删的 id=26 → HTTP 200 / body code 404 · 找不到该事项：id=26（可能已被删除）
+✅ [E7] 重复删：body code 应 404，实际 404
+ℹ️  [清理] 删除 E3 建的记录 id=27 → HTTP 200
+
+# 汇总（before）：通过 12 / 失败 2

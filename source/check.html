@@ -27,12 +27,18 @@
     .tag { display: inline-block; padding: 1px 8px; border-radius: 99px; color: #fff; font-size: 11px; }
     .hint { font-size: 12px; color: var(--ink-soft, #6b7280); margin-top: 8px; }
     .stamp { font-size: 12px; color: var(--ink-soft, #6b7280); }
+    .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 10px 0; }
+    .row label { font-size: 13px; }
+    input[type=text], input[type=number] { border: 1px solid var(--line, #e5e7eb); border-radius: 6px; padding: 6px 8px; font-size: 13px; }
+    #patch-id, #del-id { width: 110px; }
+    #patch-title { width: 260px; }
+    button.ghost { background: #fff; color: var(--ink, #1c2333); border: 1px solid var(--line, #e5e7eb); border-radius: 8px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="topbar-check">
-      <span class="brand">WorkShop <span class="brand-sub">检查台 · Day 20</span></span>
+      <span class="brand">WorkShop <span class="brand-sub">检查台 · Day 24（含 ④⑤ 修改 / 删除）</span></span>
       <a class="back-link" href="index.html">← 返回工作台</a>
     </div>
     <div class="meta-line">接口基址：<code id="api-base">—</code>　|　页面打开于 <span id="opened-at">—</span></div>
@@ -58,7 +64,31 @@
       <h2><span class="dot" id="dot-write"></span>③ 写入测试（POST → GET 读回）</h2>
       <button class="primary" id="btn-write">执行一次写入测试</button>
       <pre class="out" id="out-write">尚未执行。每次点击生成随机标题的会议并写入数据库，随后读回验证。</pre>
-      <div class="hint">⚠️ 写入的是真实数据（标题带「写入测试」前缀 + 时间戳，写入当天），可在工作台时间线上看到；本项目暂无删除接口，重复点击会产生多条。</div>
+      <div class="hint">⚠️ 写入的是真实数据（标题带「写入测试」前缀 + 时间戳，写入当天），可在工作台时间线上看到；写入体统一经 <code>toItemPayload()</code> 映射函数生成。</div>
+    </div>
+
+    <!-- 区块 4：修改测试（PATCH）· Day 24 新增 -->
+    <div class="card">
+      <h2><span class="dot" id="dot-patch"></span>④ 修改测试（PATCH → 读回确认）</h2>
+      <div class="row">
+        <label>事项 ID：<input type="text" id="patch-id" placeholder="如 12"></label>
+        <label>新标题：<input type="text" id="patch-title" placeholder="留空则自动生成一个"></label>
+        <button class="primary" id="btn-patch">提交修改</button>
+        <button class="ghost" id="btn-fill-last">填入最近一条</button>
+      </div>
+      <pre class="out" id="out-patch">尚未执行。改标题后返回更新后整条，并再次读取确认。</pre>
+      <div class="hint">只传要改的字段（部分更新）。若网关不放行 PATCH（405），自动降级为 <code>POST + ?_method=PATCH</code>。</div>
+    </div>
+
+    <!-- 区块 5：删除测试（DELETE）· Day 24 新增 -->
+    <div class="card">
+      <h2><span class="dot" id="dot-del"></span>⑤ 删除测试（DELETE → 读回确认）</h2>
+      <div class="row">
+        <label>事项 ID：<input type="text" id="del-id" placeholder="如 12"></label>
+        <button class="primary" id="btn-del">删除该事项</button>
+      </div>
+      <pre class="out" id="out-del">尚未执行。删除需二次确认，成功后回传被删内容快照，并再次读取确认已消失。</pre>
+      <div class="hint">⚠️ 硬删除不可恢复。接口侧要求 <code>confirm=true</code>；本区块另有 <b>二次确认弹窗</b>（显示标题与时间）。建议只删自己刚建的那条。</div>
     </div>
   </div>
 
@@ -71,6 +101,58 @@
     function fmtNow() { const d = new Date(); const p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; }
     function setDot(id, ok) { const el = document.getElementById(id); el.className = 'dot ' + (ok ? 'ok' : 'bad'); }
     const $ = id => document.getElementById(id);
+
+    // ---- 【Day 24】术语映射函数：清单通用记录 → items 写入体 ----
+    // 打卡清单里的 plan_days / checkins 在本项目没有对应表，统一映射到 items：
+    //   plan_days（计划日）= items 的周视图（GET 带 start/end）；checkins（打卡记录）= items 的写入+读回。
+    // 检查台与 resource/scripts/day24-flow.js 共用同一套映射，保证浏览器与脚本行为一致。
+    const TYPE_MAP = {
+      meeting: 'meeting', class: 'class', course: 'class',
+      trip: 'trip', travel: 'trip', sport: 'sport', life: 'life',
+      other: 'other', pending: 'pending',
+    };
+    function toItemPayload(rec) {
+      return {
+        table:           rec.kind === 'daily' ? 'daily' : 'work',
+        type:            TYPE_MAP[rec.type] || 'other',
+        title:           String(rec.title || ''),
+        startTime:       rec.start,
+        endTime:         rec.end,
+        attendees:       rec.people || '',
+        venue:           rec.place || '',
+        note:            rec.note || '',
+        ownerKey:        rec.owner || 'self',
+        idempotencyKey:  rec.reqId || ('day24-' + Date.now()),
+      };
+    }
+
+    // ---- 统一请求：返回 { status, json, raw }，不管是否 JSON 都不抛 ----
+    async function api(method, path, body) {
+      const opt = { method, headers: { 'Content-Type': 'application/json' } };
+      if (body !== undefined) opt.body = JSON.stringify(body);
+      const r = await fetch(API_BASE + path, opt);
+      const raw = await r.text();
+      let json = null;
+      try { json = JSON.parse(raw); } catch (e) { json = null; }
+      return { status: r.status, json, raw };
+    }
+    // 方法降级：网关不放行 PATCH/DELETE（405）时，改用 POST + ?_method=XXX（云函数已支持）
+    function methodBlocked(res) {
+      return res.status === 405 || res.status === 400 && /method not allowed|not allowed/i.test(res.raw || '');
+    }
+    async function apiWithFallback(method, path, body) {
+      let res = await api(method, path, body);
+      if (methodBlocked(res)) {
+        const sep = path.includes('?') ? '&' : '?';
+        const fb = await api('POST', path + sep + '_method=' + method, body);
+        return { ...fb, fellBack: true, firstStatus: res.status };
+      }
+      return res;
+    }
+    async function fetchAll() {    // 拉全量（无时间过滤），用于按 id 找那一条
+      const res = await api('GET', '/api/items');
+      return (res.json && res.json.data) || [];
+    }
 
     // ---- ① 健康检查 ----
     async function checkHealth() {
@@ -136,14 +218,14 @@
       const sT = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
       d.setMinutes(d.getMinutes() + 30);
       const eT = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-      const body = {
-        table: 'work', type: 'meeting',
+      // 写入体统一走映射函数（Day 24）：与 resource/scripts/day24-flow.js 同形状
+      const body = toItemPayload({
+        kind: 'work', type: 'meeting',
         title: `写入测试-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}-${Math.random().toString(36).slice(2, 6)}`,
-        startTime: sT, endTime: eT,
-        attendees: '检查台', venue: '线上', note: 'Day 20 检查台写入测试',
-        ownerKey: 'self',
-        idempotencyKey: 'check-' + Date.now(),   // 每次点击唯一，幂等键兜底
-      };
+        start: sT, end: eT,
+        people: '检查台', place: '线上', note: 'Day 24 检查台写入测试',
+        owner: 'self', reqId: 'check-' + Date.now(),   // 每次点击唯一，幂等键兜底
+      });
       try {
         const t0 = performance.now();
         const r = await fetch(API_BASE + '/api/items', {
@@ -170,9 +252,107 @@
       } finally { btn.disabled = false; }
     }
 
+    // ---- ④ 修改测试（PATCH → 读回确认）【Day 24】----
+    async function patchTest() {
+      const id = $('patch-id').value.trim();
+      const title = $('patch-title').value.trim() || ('已改-' + fmtNow().slice(11).replace(/:/g, ''));
+      if (!/^\d+$/.test(id)) {
+        setDot('dot-patch', false);
+        $('out-patch').textContent = 'id 无效：' + (id || '(空)') + '（应为正整数；本地临时 id 没有云端 id）';
+        return;
+      }
+      const btn = $('btn-patch'); btn.disabled = true;
+      $('dot-patch').className = 'dot';
+      $('out-patch').textContent = '执行中…';
+      try {
+        const t0 = performance.now();
+        const res = await apiWithFallback('PATCH', `/api/items?id=${encodeURIComponent(id)}`, { title });
+        const ms = Math.round(performance.now() - t0);
+        const j = res.json || {};
+        if (!j.ok) {
+          setDot('dot-patch', false);
+          $('out-patch').textContent =
+            `HTTP ${res.status}（${ms}ms）${res.fellBack ? ` · 已降级 POST+_method=PATCH（首次 ${res.firstStatus}）` : ''}\n` +
+            `错误：${(j.error && j.error.message) || res.raw.slice(0, 300)}`;
+          return;
+        }
+        const list = await fetchAll();
+        const hit = list.find(it => String(it.id) === String(id));
+        const okTitle = !!hit && hit.title === title;
+        setDot('dot-patch', okTitle);
+        $('out-patch').textContent =
+          `${res.fellBack ? 'POST + _method=PATCH（首次 ' + res.firstStatus + '）' : 'PATCH'} HTTP ${res.status}（${ms}ms）\n` +
+          `目标：id=${id} → 新标题「${title}」\n` +
+          `读回确认：${okTitle ? '✅ 该条标题已是新值' : (hit ? '❌ 读回标题仍为「' + hit.title + '」' : '❌ 读回未找到该 id')}\n\n` +
+          JSON.stringify(j, null, 2);
+      } catch (e) {
+        setDot('dot-patch', false);
+        $('out-patch').textContent = '修改失败：' + e.message;
+      } finally { btn.disabled = false; }
+    }
+
+    // ---- ⑤ 删除测试（DELETE → 读回确认）【Day 24】----
+    async function deleteTest() {
+      const id = $('del-id').value.trim();
+      if (!/^\d+$/.test(id)) {
+        setDot('dot-del', false);
+        $('out-del').textContent = 'id 无效：' + (id || '(空)') + '（应为正整数）';
+        return;
+      }
+      const btn = $('btn-del'); btn.disabled = true;
+      $('dot-del').className = 'dot';
+      $('out-del').textContent = '正在查找该条…';
+      try {
+        const list = await fetchAll();
+        const target = list.find(it => String(it.id) === String(id));
+        const desc = target
+          ? `标题：${target.title}\n时间：${target.startTime} ~ ${target.endTime}\n归属：${target.ownerKey}`
+          : `（列表中未找到 id=${id}，可能已被删除）`;
+        if (!window.confirm(`确认删除 id=${id}？\n${desc}\n\n硬删除不可恢复。`)) {
+          $('out-del').textContent = '已取消，未发送删除请求。';
+          return;
+        }
+        const t0 = performance.now();
+        const res = await apiWithFallback('DELETE', `/api/items?id=${encodeURIComponent(id)}&confirm=true`);
+        const ms = Math.round(performance.now() - t0);
+        const j = res.json || {};
+        if (!j.ok) {
+          setDot('dot-del', false);
+          $('out-del').textContent =
+            `HTTP ${res.status}（${ms}ms）${res.fellBack ? ` · 已降级 POST+_method=DELETE（首次 ${res.firstStatus}）` : ''}\n` +
+            `错误：${(j.error && j.error.message) || res.raw.slice(0, 300)}`;
+          return;
+        }
+        const after = await fetchAll();
+        const stillThere = after.some(it => String(it.id) === String(id));
+        setDot('dot-del', !stillThere);
+        $('out-del').textContent =
+          `${res.fellBack ? 'POST + _method=DELETE（首次 ' + res.firstStatus + '）' : 'DELETE'} HTTP ${res.status}（${ms}ms）\n` +
+          `读回确认：${stillThere ? '❌ 该 id 仍在列表中' : '✅ 该 id 已从列表消失'}\n` +
+          `被删快照：${JSON.stringify(j.data && j.data.item || j.data)}\n\n` +
+          JSON.stringify(j, null, 2);
+        loadItems();   // 顺带刷新 ② 区块
+      } catch (e) {
+        setDot('dot-del', false);
+        $('out-del').textContent = '删除失败：' + e.message;
+      } finally { btn.disabled = false; }
+    }
+
+    // 把最近一条的 id 填进 ④ ⑤ 输入框（省得手抄）
+    async function fillLast() {
+      const list = await fetchAll();
+      if (!list.length) { $('out-patch').textContent = '列表为空，没有可填的 id。'; return; }
+      const last = list[list.length - 1];
+      $('patch-id').value = last.id; $('del-id').value = last.id;
+      $('out-patch').textContent = `已填入最近一条：id=${last.id}「${last.title}」（${last.startTime} ~ ${last.endTime}）`;
+    }
+
     $('btn-health').addEventListener('click', checkHealth);
     $('btn-items').addEventListener('click', loadItems);
     $('btn-write').addEventListener('click', writeTest);
+    $('btn-patch').addEventListener('click', patchTest);      // Day 24 新增 ④
+    $('btn-del').addEventListener('click', deleteTest);       // Day 24 新增 ⑤
+    $('btn-fill-last').addEventListener('click', fillLast);   // Day 24 新增
     checkHealth(); loadItems();   // 打开页面自动跑 ①②
   </script>
 </body>

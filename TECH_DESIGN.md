@@ -4,6 +4,18 @@
 > 日期：2026-09-20（Day 5 产出）
 > 依据：PRD.md（Day 4）、research.md（Day 3）
 > 状态：MVP 技术路线确认稿（仅设计，不含代码）
+>
+> ---
+> ### ⚠️ 阅读前必看：本文档是 **Day 5 稿**，部分结论已被后续实际落地取代
+>
+> | 本文原结论（Day 5） | 实际落地（Day 15–22） | 现在以谁为准 |
+> |---|---|---|
+> | 后端：**无自建后端**，前端直连外部服务 | 已建 **CloudBase 云函数**（`source/cloud/health`、`source/cloud/items`），走 HTTP 网关路由 | `api-contract.md` + `DEPLOY.md` |
+> | 数据库：**腾讯文档智能表**当库 | 主存储改为 **CloudBase 关系库（PostgreSQL）**，表结构见 `db/schema.sql` | `db/schema.sql` |
+> | 腾讯文档 | 降为**预留同步层**：`external_id` 等字段已预留，**未实现同步** | `db/schema.sql` 文末「预留接口说明」 |
+> | 云函数调用方式 | 共享集群 PG 不暴露 IP:Port，函数**零依赖直打 PostgREST HTTP API**（`Accept-Profile` 头） | `source/cloud/items/index.js` 头部注释 |
+>
+> 上面 §1–§4 的 Day 5 论证过程**原样保留**（作为选型留痕），仅此表做更正。**不要照 §1.2 的"无自建后端"去写代码**。
 
 ---
 
@@ -183,4 +195,5 @@ flowchart LR
 | 日期 | 修订位置 | 修订内容 | 依据（取后者为准） |
 |---|---|---|---|
 | 2026-09-20 | §2.1 技术路线一行总结 | PreText 由"已列入技术路线"更正为"依 Day 7 决策暂缓至后续、预留 `renderItemText()` 接缝"，与 §2.4、§1.2 一致 | Day 7 决策（晚于 §2.1 初稿） |
+| 2026-10-04（Day 24） | 文首新增「阅读前必看」更正表 | §1.2「后端=无自建后端 / 数据库=腾讯文档」已被 Day 15–22 实际落地取代：真实后端为 CloudBase 云函数、主存储为 PostgreSQL，腾讯文档降为预留同步层。Day 5 论证原样保留作留痕 | Day 15–22 部署与建表结果（DEPLOY.md / db/schema.sql / api-contract.md） |
 

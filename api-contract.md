@@ -35,7 +35,7 @@
 | `type` | string | 事项类型 | `work`: `meeting`/`trip`/`pending`；`daily`: `class`/`sport`/`life`/`other` |
 | `title` | string | 标题 | 必填，≤100 字 |
 | `startTime` | string | 开始时间 | `YYYY-MM-DD HH:mm` |
-| `endTime` | string | 结束时间 | `YYYY-MM-DD HH:mm`，须 ≥ `startTime` |
+| `endTime` | string | 结束时间 | `YYYY-MM-DD HH:mm`，**须晚于 `startTime`（不允许零时长）**；【Day 24 契约变更】原为「≥」，因零时长在排会语义下无意义（既不是区间也不是待排），改为严格「>」 |
 | `attendees` | string | 参与人 | 可空，文本或逗号分隔 |
 | `venue` | string | 地点 | 可空 |
 | `note` | string | 备注 | 可空 |
@@ -109,7 +109,7 @@
 ```
   - 可选字段 `idempotencyKey`（幂等键，客户端自生成字符串）：传了则重复提交同一 key 触发 409；不传也能正常写入（该列 NULL，不受 UNIQUE 约束）。用于防御前端重试/重复点击。
 - **必填**：`title`/`table`/`type`/`startTime`/`endTime`/`ownerKey`；缺任一 → `400 {ok:false,error:{code:400,message:"缺少必填字段：<中文名>"}}`。
-- **取值校验**：`table∈{work,daily}`；`type` 取契约允许集；`ownerKey∈{self,depta,deptb,deptc,deptd,me}`；`startTime`/`endTime` 须 `YYYY-MM-DD HH:mm` 且 `endTime≥startTime` → 否则 `400`/`422`（中文）。
+- **取值校验**：`table∈{work,daily}`；`type` 取契约允许集；`ownerKey∈{self,depta,deptb,deptc,deptd,me}`；`startTime`/`endTime` 须 `YYYY-MM-DD HH:mm`（【Day 24】解析放宽：允许 `/` 分隔日期、`T` 分隔日期与时间、月/日/时可不补前导零，内部统一归一成规范串）且 **`endTime > startTime`** → 否则 `400`/`422`（中文）。零时长（`endTime === startTime`）一律 `422`「结束时间须晚于开始时间」。
 - **🛡️ 防重复提交（Day 18 选「A+B 双保险」）**：
   - **A 内容去重**：插入前按 `(title+start_time+end_time+owner_key+table_kind+type)` 查重，命中 → `409 {ok:false,error:{code:409,message:"请勿重复提交：该事项已存在"}}`（不依赖额外字段，天然拦截同内容重复会议）。
   - **B 幂等键兜底**：`items` 表新增 `idempotency_key VARCHAR(64) UNIQUE` 列；请求体可带 `idempotencyKey`（客户端自生成），写入时映射该列。数据库唯一约束兜底，同一 key 重复提交 → `409 {ok:false,error:{code:409,message:"请勿重复提交：该请求已处理（idempotencyKey 重复）"}}`。不传 `idempotencyKey` 也能正常写入（该列 NULL，不受 UNIQUE 约束）。
@@ -140,7 +140,8 @@
   - **必须带 id 过滤**：PostgREST 的 PATCH 不带过滤条件会**整表更新**，故 `id` 为必填且必须是正整数（本地临时 id 如 `u1718…` 直接 400 挡掉）。
   - **返回更新后整条**（`Prefer: return=representation`），前端可直接替换内存对象，不必再发一次 GET。
 - **响应 200**：`{ "ok": true, "data": <更新后的 item 对象>, "error": null }`。
-- **错误**：`400` 缺 id / id 非法 / 无有效字段 / 取值非法（中文）；`404` 该 id 不存在（含"已被删掉"的情况）；`422` 时间区间非法（中文，含改后的开始/结束值）；`409` 与已有事项冲突（重复内容或幂等键）；`500` 服务端失败。
+- **错误**：`400` 缺 id / id 非法 / 无有效字段 / 取值非法（中文）；`404` 该 id 不存在（含"已被删掉"的情况）；`422` 时间区间非法（中文，**含「结束须晚于开始」，零时长同样 422**）；`409` 与已有事项冲突（重复内容或幂等键）；`500` 服务端失败。
+  - 【Day 24】区间校验的比较口径：库里原值经 `fmtTime()` 只到分钟，本次新值经 `normalizeTime()` 带秒，**比较前两边统一截到分钟**（`slice(0,16)`），否则 `'15:13' < '15:13:00'` 会把边界值判成倒挂。
 - **方法兼容**：`PUT` 走同一套逻辑（契约以 PATCH 为准，PUT 仅兼容旧写法）；若网关不放行 PATCH/DELETE 返回 405，可用 `POST` + `?_method=PATCH`（或请求体带 `_method`）兜底，业务逻辑完全一致。
 
 ---

@@ -1,0 +1,16 @@
+# Day 24 本地直调验证 · 轮次=after · 2026-10-04T05:21:58.745Z
+（此脚本不经过 HTTP 网关，看到的就是云函数自己返回的 statusCode）
+
+[GET 正常读取] 函数返回 statusCode=503 | body.error.code=503 | CORS头=true
+         {"ok":false,"data":null,"error":{"code":503,"message":"数据服务鉴权未通过，请联系管理员检查服务配置"}}
+[POST 空标题] 函数返回 statusCode=400 | body.error.code=400 | CORS头=true
+         {"ok":false,"data":null,"error":{"code":400,"message":"缺少必填字段：标题"}}
+[PATCH 非法 id] 函数返回 statusCode=400 | body.error.code=400 | CORS头=true
+         {"ok":false,"data":null,"error":{"code":400,"message":"id 无效：u1718abc（应为正整数；本地未保存的临时事项没有云端 id）"}}
+[DELETE 缺 confirm] 函数返回 statusCode=400 | body.error.code=400 | CORS头=true
+         {"ok":false,"data":null,"error":{"code":400,"message":"删除需要显式确认：请带 confirm=true（?id=12&confirm=true 或请求体 {\"id\":12,\"confirm\":true}）"}}
+[DELETE 不存在 id] 函数返回 statusCode=503 | body.error.code=503 | CORS头=true
+         {"ok":false,"data":null,"error":{"code":503,"message":"数据服务鉴权未通过，请联系管理员检查服务配置"}}
+
+>> 判读：若上面 statusCode 全是 200、而 body.error.code 是 400/404，
+   说明「锅在云函数代码」——函数自己就只给了 200，网关没有改写。

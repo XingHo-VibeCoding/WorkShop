@@ -39,7 +39,16 @@ function corsHeaders(event = {}, extra = {}) {
 }
 
 // 统一包成 HTTP 完整返回形态（业务逻辑仍返回裸 { ok, data, error }，在此处包壳）
-function http(event, payload, statusCode = 200) {
+function http(event, payload, statusCode) {
+  // —— 【Day 24 修复】错误响应的 HTTP 状态码 ——
+  // 改前：statusCode 默认 200，而业务错误分支只返回裸 {ok:false,error:{code}}、不传第三参，
+  //       于是"缺字段/非法id/缺confirm/重复删除"这些错误在 HTTP 层全是 200，只有展开 body
+  //       才看得到 code —— 违反契约 §一（错误响应应为 HTTP 4xx/5xx），也让 Network 面板看不出失败。
+  // 改后：没显式给状态码时，从 error.code 推导；正常响应一律 200；catch 分支已传 e.code 的不受影响。
+  if (statusCode == null) {
+    const c = payload && payload.error && Number(payload.error.code);
+    statusCode = (payload && payload.ok === false && c >= 400 && c < 600) ? c : 200;
+  }
   return { statusCode, headers: corsHeaders(event), body: JSON.stringify(payload) };
 }
 
@@ -99,11 +108,19 @@ const ITEM_TYPES = ['meeting', 'trip', 'travel', 'course', 'class', 'sport', 'li
 const OWNER_KEYS = ['self', 'depta', 'deptb', 'deptc', 'deptd', 'me'];
 
 // 时间规整：YYYY-MM-DD HH:mm(:ss) → YYYY-MM-DD HH:mm:ss（补秒，便于与库内值精确比对去重）
+// 【Day 24】解析放宽（契约同步）：前端已改成拨轮选时间、不再手打，但脚本 / 将来的导入接口仍会送各种写法，
+//   所以这里接受：日期用 - 或 / 分隔、日期与时间之间空格或 T、月/日/时/分可不补前导零。
+//   归一后一律输出规范串 YYYY-MM-DD HH:mm:ss，下游（去重、周计算、校验）看到的永远是同一种形状。
 function normalizeTime(s) {
   if (!s) return null;
-  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/.exec(String(s).trim());
+  const m = /^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(String(s).trim());
   if (!m) return null;
-  const y = m[1], mo = m[2], d = m[3], h = m[4], mi = m[5], se = m[6] || '00';
+  const p2 = (x) => String(x).padStart(2, '0');
+  const y = m[1], mo = p2(m[2]), d = p2(m[3]), h = p2(m[4]), mi = m[5], se = m[6] || '00';
+  // 顺带挡掉不存在的月/日/时/分，避免 '2026-13-40 99:99' 这种被当成合法时间写进库
+  if (Number(mo) < 1 || Number(mo) > 12) return null;
+  if (Number(d) < 1 || Number(d) > 31) return null;
+  if (Number(h) > 23 || Number(mi) > 59 || Number(se) > 59) return null;
   return `${y}-${mo}-${d} ${h}:${mi}:${se}`;
 }
 
@@ -156,7 +173,9 @@ async function createItem(event) {
   const end = normalizeTime(body.endTime);
   if (!start) return { ok: false, data: null, error: { code: 400, message: '开始时间格式应为 YYYY-MM-DD HH:mm' } };
   if (!end) return { ok: false, data: null, error: { code: 400, message: '结束时间格式应为 YYYY-MM-DD HH:mm' } };
-  if (end < start) return { ok: false, data: null, error: { code: 422, message: '结束时间须不早于开始时间' } };
+  // 【Day 24 契约变更】零时长（end === start）不再允许：排会语义下既不是区间也不是待排事项，
+  // 原「≥」改为严格「>」。前端拨轮选完结束时会自动 +30 分钟，正常路径不会踩到这条。
+  if (end <= start) return { ok: false, data: null, error: { code: 422, message: '结束时间须晚于开始时间' } };
 
   const title = String(body.title).trim();
   const week = getISOWeek(start) || '';
@@ -286,12 +305,15 @@ async function patchItem(event) {
   const old = await db.findItemById(id);
   if (!old) return { ok: false, data: null, error: { code: 404, message: `找不到该事项：id=${id}` } };
 
-  const newStart = patch.start_time || old.startTime;   // old.startTime 形如 '2026-09-30 15:00'，比大小够用
+  const newStart = patch.start_time || old.startTime;   // old.startTime 形如 '2026-09-30 15:00'
   const newEnd = patch.end_time || old.endTime;
-  if (newEnd < newStart) {
-    // 显示时统一截到分钟（库里原值带秒、新值也带秒，直接拼会让提示一会儿有秒一会儿没秒）
-    const show = (t) => String(t).slice(0, 16);
-    return { ok: false, data: null, error: { code: 422, message: `结束时间须不早于开始时间（改后：开始 ${show(newStart)} / 结束 ${show(newEnd)}）` } };
+  // 【Day 24 修复 B2】比较前两边都截到分钟：
+  // 库里原值走 fmtTime() 只到 'HH:mm'，本次新值走 normalizeTime() 带 ':ss'，
+  // 直接字符串比会让 '15:13' < '15:13:00' 成立 → 把「开始=结束」的零时长误判成 422，
+  // 而契约只要求「结束 ≥ 开始」，相等是允许的。统一口径后零时长放行、真正的倒挂照样拦。
+  const minute = (t) => String(t).slice(0, 16);
+  if (minute(newEnd) <= minute(newStart)) {
+    return { ok: false, data: null, error: { code: 422, message: `结束时间须晚于开始时间（改后：开始 ${minute(newStart)} / 结束 ${minute(newEnd)}）` } };
   }
   // 开始时间变了 → ISO 周要跟着重算，否则这条事项会从它所属那一周里"消失"
   if (patch.start_time) patch.week = getISOWeek(patch.start_time) || old.week;

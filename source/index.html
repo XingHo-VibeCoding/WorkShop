@@ -59,8 +59,16 @@
           <!-- 7 天分列由 JS 渲染 -->
         </section>
         <aside class="detail" id="detail">
-          <p class="detail-empty">点击时间线上的事项查看详情。</p>
+          <!-- [Day 25] 移动端可拖动底部抽屉：手柄常驻，内容体由 JS 注入；桌面端手柄隐藏、详情常驻右栏 -->
+          <div class="sheet-handle" id="sheet-handle" role="button" tabindex="0" aria-label="拖动调整面板高度：上拖展开、下拖收起或关闭；点按在展开与收起间切换">
+            <span class="sheet-grip"></span>
+          </div>
+          <div class="detail-body" id="detail-body">
+            <p class="detail-empty">点击时间线上的事项查看详情。</p>
+          </div>
         </aside>
+        <!-- [Day 24 修复] 移动端底部抽屉遮罩：点它收起详情；此前 HTML 漏写此节点，抽屉打开后无遮罩、无法点按关闭 -->
+        <div class="detail-scrim"></div>
       </main>
 
       <!-- 页面底部：表签切换（仿 Excel） -->
@@ -181,6 +189,8 @@
     </div>
   </div>
 
+  <!-- [Day 24] 时间拨轮：无依赖，须在 timeline.js 之前加载 -->
+  <script src="js/timepicker.js"></script>
   <script src="js/timeline.js"></script>
   <script src="js/router.js"></script>
   <script src="js/animations.js"></script>

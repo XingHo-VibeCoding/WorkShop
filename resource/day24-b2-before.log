@@ -1,0 +1,18 @@
+# Day 24 · B2 余力加练验证 · 轮次=before
+# 原记录（mock）：2026-10-04 14:43 ~ 2026-10-04 15:13
+# 契约：endTime 须 **晚于** startTime（Day 24 变更，零时长一律拒绝）
+
+✅ [① 零时长 startTime=原endTime] 期望 拒绝 → 实际 HTTP 200 / code 422
+         {"ok":false,"data":null,"error":{"code":422,"message":"结束时间须不早于开始时间（改后：开始 2026-10-04 15:13 / 结束 2026-10-04 15:13）"}}
+✅ [② 真倒挂 startTime 晚于 end] 期望 拒绝 → 实际 HTTP 200 / code 422
+         {"ok":false,"data":null,"error":{"code":422,"message":"结束时间须不早于开始时间（改后：开始 2026-10-04 16:00 / 结束 2026-10-04 15:13）"}}
+✅ [③ endTime 早于 start] 期望 拒绝 → 实际 HTTP 200 / code 422
+         {"ok":false,"data":null,"error":{"code":422,"message":"结束时间须不早于开始时间（改后：开始 2026-10-04 14:43 / 结束 2026-10-04 14:00）"}}
+✅ [④ 只改标题（基线）] 期望 成功 → 实际 HTTP 200 / code 200
+         {"ok":true,"data":{"id":12,"title":"新标题","type":"meeting","table":"work","startTime":"2026-10-04 14:43","endTime":"2026-10-04 15:13","week":"2026-W40","ownerKey
+✅ [⑤ endTime 后推 30 分钟] 期望 成功 → 实际 HTTP 200 / code 200
+         {"ok":true,"data":{"id":12,"title":"原标题","type":"meeting","table":"work","startTime":"2026-10-04 14:43","endTime":"2026-10-04 15:43","week":"2026-W40","ownerKey
+
+# 汇总（before）：通过 5 / 失败 0
+# 预期：① ②③ 拒绝（零时长/倒挂），④⑤ 放行（正常改动不被误伤）
+# 注：契约变更前 ① 的期望是"放行"，变更后改为"拒绝"，故本脚本判定已同步反转。

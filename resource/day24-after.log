@@ -1,0 +1,48 @@
+# Day 24 核心流程测试 · 轮次=after · 时间=2026-10-04 13:43:17
+# API_BASE=https://workshop-d4g02a7z81ff51a63-1d496602788.ap-shanghai.app.tcloudbase.com
+
+--- T2 读取：GET /api/items（本周范围）---
+    HTTP 200（791ms） {"ok":true,"data":[{"id":5,"title":"高等数学(二)","type":"course","table":"work","startTime":"2026-09-28 08:00","endTime":"2026-09-28 09:40","week":"2026-W39","atten
+✅ [T2] 读取本周数据：HTTP 200，data 条数=11
+
+--- T3 写入：POST /api/items ---
+    请求体={"table":"work","type":"meeting","title":"Day24-after-oi7f","startTime":"2026-10-04 14:43","endTime":"2026-10-04 15:13","attendees":"脚本","venue":"线上","note":"Day 24 after 测试","ownerKey":"self","idempotencyKey":"day24-after-1791092598790"}
+    HTTP 200（277ms） {"ok":true,"data":{"id":29,"title":"Day24-after-oi7f","type":"meeting","table":"work","startTime":"2026-10-04 14:43","endTime":"2026-10-04 15:13","week":"2026-W40","attendees":"脚本","venue":"线上","equip
+✅ [T3] 写入返回 id=29（HTTP 200）
+
+--- T4 刷新确认：GET 同一天，找新 id ---
+✅ [T4] 读回：找到「Day24-after-oi7f」2026-10-04 14:43~2026-10-04 15:13
+
+--- T5 修改：PATCH /api/items?id=<id>（改标题）---
+    HTTP 200（132ms） {"ok":true,"data":{"id":29,"title":"Day24-after-oi7f-改","type":"meeting","table":"work","startTime":"2026-10-04 14:43","endTime":"2026-10-04 15:13","week":"2026-W40","attendees":"脚本","venue":"线上","equ
+✅ [T5] 改标题后读回：「Day24-after-oi7f-改」（HTTP 200）
+
+--- E8 刁钻：PATCH 只改 startTime = 原 endTime（零时长）---
+    HTTP 422（91ms） {"ok":false,"data":null,"error":{"code":422,"message":"结束时间须不早于开始时间（改后：开始 2026-10-04 15:13 / 结束 2026-10-04 15:13）"}}
+❌ [E8] 零时长修改（开始=结束=2026-10-04 15:13）：契约允许 end==start，实际 HTTP 422 / code 422｜结束时间须不早于开始时间（改后：开始 2026-10-04 15:13 / 结束 2026-10-04 15:13）
+
+--- T6 删除：DELETE /api/items?id=<id>&confirm=true ---
+    HTTP 200（125ms） {"ok":true,"data":{"id":29,"deleted":true,"item":{"id":29,"title":"Day24-after-oi7f-改","type":"meeting","table":"work","startTime":"2026-10-04 14:43","endTime":"2026-10-04 15:13","week":"2026-W40","at
+✅ [T6] 删除后读回：已消失（HTTP 200）
+
+--- E 系列：刁钻输入 ---
+    E1 空标题 → HTTP 400 / body code 400 · 缺少必填字段：标题
+✅ [E1] 空标题：body code 应为 400，实际 400
+✅ [B1] ★错误响应 HTTP 状态应为 4xx（契约 §一：错误响应 HTTP 4xx/5xx），实际 HTTP 400
+    E2 500字标题 → HTTP 400 / body code 400 · 写入 items 失败：value too long for type character varying(200)
+✅ [E2] 超长标题：body code 应为 400/422 且提示中文，实际 400
+    E3 第 1 次 → HTTP 200 / body code 200 · {"ok":true,"data":{"id":30,"title":"Day24-after-dup-nf85","t
+    E3 第 2 次 → HTTP 409 / body code 409 · 请勿重复提交：该事项已存在
+    E3 第 3 次 → HTTP 409 / body code 409 · 请勿重复提交：该事项已存在
+✅ [E3] 连点三次 body code 200/409/409（期望 200/409/409）
+    E4 结束早于开始 → HTTP 422 / body code 422 · 结束时间须不早于开始时间
+✅ [E4] 非法区间：body code 应 422，实际 422
+    E5 非法 id → HTTP 400 / body code 400 · id 无效：u1718abc（应为正整数；本地未保存的临时事项没有云端 id）
+✅ [E5] 非法 id：body code 应 400，实际 400
+    E6 不带 confirm → HTTP 400 / body code 400 · 删除需要显式确认：请带 confirm=true（?id=12&confirm=true 或请求体 {"id":12,"confirm":true}）
+✅ [E6] 缺 confirm：body code 应 400，实际 400
+    E7 删已删的 id=29 → HTTP 404 / body code 404 · 找不到该事项：id=29（可能已被删除）
+✅ [E7] 重复删：body code 应 404，实际 404
+ℹ️  [清理] 删除 E3 建的记录 id=30 → HTTP 200
+
+# 汇总（after）：通过 13 / 失败 1
