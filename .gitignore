@@ -31,3 +31,8 @@ resource/text/
 
 # WorkBuddy 会话产物（.genie 会话文件），不进仓库
 .wbapp_*.genie
+
+# Day 28 增补：发布包与历史日志不进仓库
+#   zip 体积大且可从发布流程重建；日志每次重跑内容都变，不适合版本跟踪
+resource/release/*.zip
+resource/*.log
