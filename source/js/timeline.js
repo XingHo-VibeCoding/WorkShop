@@ -1373,6 +1373,17 @@ document.getElementById('btn-new').addEventListener('click', () => renderForm(nu
 document.getElementById('btn-empty-new').addEventListener('click', () => { setState('success'); renderForm(null); });
 // 错误状态「重试」
 document.getElementById('btn-retry').addEventListener('click', () => bootstrap());
+// [Day 27] 顶栏「↻ 刷新」手动兜底：bootstrap() 内部已兜住异常并切到 error 态，不会抛出，
+// 故这里靠 error 面板是否可见来判断成败，再决定播报文案（不能无条件说"已刷新"）。
+document.getElementById('btn-refresh').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-refresh');
+  const errPanel = document.querySelector('.state-panel[data-state="error"]');
+  btn.disabled = true;
+  await bootstrap();
+  btn.disabled = false;
+  const failed = errPanel && !errPanel.hidden;
+  showToast(failed ? '刷新失败，请重试' : '已刷新');
+});
 // 底部表签切换
 document.getElementById('sheet-tabs').addEventListener('click', e => {
   const btn = e.target.closest('button[data-mode]');

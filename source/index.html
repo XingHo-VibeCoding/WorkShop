@@ -19,6 +19,10 @@
       <button id="btn-new" class="primary">+ 新建</button>
       <button id="btn-settings" title="打开设置：自定义部门、标记、类型颜色、默认视图、导入导出">设置</button>
       <button id="btn-import" title="导入日程（JSON）；图片/Excel 识别待第 3 周 OCR 接入">导入</button>
+      <!-- [Day 27] 手动刷新（后手，非主流程）：增删改后界面本已自动更新，此按钮只作兜底入口。
+           来源：第三方试用时用户想确认"刚才那条是不是真的存住了"，却找不到任何入口（只能按 F5）。
+           与内部检查台 check.html 的「刷新数据」对齐。 -->
+      <button id="btn-refresh" title="重新从云端拉取最新数据（正常增删改后会自动更新，这里只是手动兜底）">↻ 刷新</button>
     </div>
   </header>
 
