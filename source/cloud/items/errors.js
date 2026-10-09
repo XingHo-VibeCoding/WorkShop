@@ -66,6 +66,14 @@ const USER_MESSAGES = {
 
 // 出站：把任何异常翻成契约里的 { code, message }（固定两字段，不多不少）
 function toUserError(err) {
+  // 【阶段二 P6-②】预置人话直通：有些模块（如 identity_phase2.js）抛错时已经想好了
+  // 该给用户看什么、返回什么状态码，就挂在 err.userMessage / err.code 上。
+  // 不先看这里的话，"signature mismatch" 这类英文会被下面的文本分类误判成"服务端错"，
+  // 于是「令牌被篡改」返回 500 服务不可用 —— 语义全错，还会让人以为是服务挂了。
+  // 有预置文案就原样用（直通），没有才走分类。
+  if (err && err.userMessage && Number(err.code) >= 400) {
+    return { code: Number(err.code), message: String(err.userMessage) };
+  }
   return Object.assign({}, USER_MESSAGES[classify(err)]);
 }
 

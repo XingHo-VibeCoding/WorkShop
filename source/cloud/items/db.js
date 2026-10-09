@@ -34,8 +34,12 @@ const GATEWAY = `https://${ENV_ID}.api.tcloudbasegateway.com`;
 const DEVICE_ID = 'workshop-items-' + Math.random().toString(36).slice(2, 10);
 
 // items 表的真实列（来自 db/schema.sql）
+// 【阶段二 P6-②】末尾 6 列为 P5 迁移新增（db/schema_phase2.sql），必须同步登记 ——
+// ★ 不改这里会出现「库里有值、接口读不到」的幽灵问题（TECH_DESIGN R3）。
+//   兼容性：只追加、不删旧列 ⇒ 老字段一个不少，v1.0 前端不受影响。
 const COLUMNS =
-  'id,title,type,table_kind,start_time,end_time,week,attendees,venue,equipment,note,source,status,owner_key,idempotency_key,created_at,updated_at';
+  'id,title,type,table_kind,start_time,end_time,week,attendees,venue,equipment,note,source,status,owner_key,idempotency_key,created_at,updated_at,' +
+  'owner_member_id,created_by,updated_by,border_color,meeting_no,meeting_url';
 
 // —— Bearer 解析：优先 API Key（service_role），兜底匿名登录并缓存 ——
 let _token = null;
@@ -113,6 +117,14 @@ function toItem(r) {
     ownerKey: r.owner_key,
     createdAt: fmtTime(r.created_at),
     updatedAt: fmtTime(r.updated_at),
+    // 【阶段二 P6-②】新增字段（P5 迁移已建列）。缺省一律 null，老数据不受影响。
+    // ★ 颜色分工：fill 由 type（日程类型）决定，borderColor 只管【人】的外框，二者不冲突。
+    ownerMemberId: r.owner_member_id != null ? r.owner_member_id : null,
+    createdBy: r.created_by != null ? r.created_by : null,
+    updatedBy: r.updated_by != null ? r.updated_by : null,
+    borderColor: r.border_color || null,
+    meetingNo: r.meeting_no || null,
+    meetingUrl: r.meeting_url || null,
   };
 }
 
@@ -307,4 +319,49 @@ async function deleteItem(id) {
   return { deleted: toItem(rows[0]) };
 }
 
-module.exports = { queryItems, findDuplicate, insertItem, findItemById, updateItem, deleteItem };
+// —— 【阶段二 P6-②】成员查询：口令登录（方案 B = 显示名 + 口令，用户拍板）——
+// 本函数只负责"把这一行的 salt 和哈希取回来"，**不做任何比对**（比对在 identity_phase2 里），
+// 保持分层：数据访问层碰库、身份模块碰密码学，两边都能单独测。
+// ⚠️ 安全：identity_key / salt 是凭据，**绝不能出现在任何对外响应里**，只在本进程内流转。
+async function findMemberByName(displayName) {
+  const name = String(displayName || '').trim();
+  if (!name) return null;
+  const token = await getBearer();
+  const p = new URLSearchParams();
+  p.set('select', 'id,display_name,identity_key,auth_kind,role,border_color,meeting_no,meeting_url,salt,note');
+  p.set('display_name', `eq.${name}`);
+  p.set('auth_kind', 'eq.passcode');     // 只认口令成员；微信/匿名身份本期不启用
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/members_phase2?${p.toString()}`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Accept': 'application/json',
+      'Accept-Profile': SCHEMA,
+      'Content-Profile': SCHEMA,
+    },
+  });
+  const text = await res.text();
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (e) {
+    throw new Error(`查询成员返回非 JSON（HTTP ${res.status}）：${text.slice(0, 200)}`);
+  }
+  if (!res.ok) {
+    const msg = (json && (json.message || json.error || json.error_description || json.hint)) || `HTTP ${res.status}`;
+    throw new Error(`查询成员失败：${msg}`);
+  }
+  const rows = Array.isArray(json) ? json : (json && json.data) || [];
+  return rows.length ? rows[0] : null;   // 查不到返回 null，由调用方统一按"口令无效"处理（不泄露是否存在该成员）
+}
+
+module.exports = {
+  queryItems,
+  findDuplicate,
+  insertItem,
+  findItemById,
+  updateItem,
+  deleteItem,
+  // 【阶段二 P6-②】
+  findMemberByName,
+};

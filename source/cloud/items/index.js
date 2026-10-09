@@ -18,6 +18,15 @@ const db = require('./db.js');
 // 分类规则与文案都在 errors.js 里，本文件只负责"接上"。
 const { toUserError, logError } = require('./errors.js');
 
+// —— 【阶段二 P6-②】身份与令牌模块 ——
+// 登录（名字 + 口令 → 令牌）与身份校验都靠它。本文件只做「接线」和「入参校验」：
+// 口令哈希、令牌签名这类密码学的事全在 identity_phase2.js 里，碰库的仍归 db.js。
+// ★ 分层理由：身份模块要被多处复用（登录、后续写操作的权限判定），独立成文件才能单独测。
+// ★ 微信路线已放弃（P6-① 探针①实测：启用必须填公众号 AppID + AppSecret，个人主体拿不到），
+//   本期身份 = 口令方案（方案 2），登录需「显示名 + 口令」两项（用户 2026-10-07 拍板方案 B，
+//   理由：后续要通用化，按名字定位比全表逐一比对更容易扩展）。
+const identity = require('./identity_phase2.js');
+
 // —— 【Day 20 · CORS 配置】——
 // 浏览器跨域调用本接口时，响应必须带 Access-Control-Allow-Origin，否则被浏览器拦截。
 // 白名单只放行：生产静态托管域名 + 本地调试端口，禁止 * 通配符（Day 20 清单硬性要求）。
@@ -364,6 +373,85 @@ async function removeItem(event) {
   return { ok: true, data: { id: Number(id), deleted: true, item: old }, error: null };
 }
 
+// —— 【阶段二 P6-②】成员身份：登录 ——
+// 入参：{ name, passcode }（请求体或查询串都收；口令走请求体更安全，查询串会被网关日志记下）
+// 出参：{ token, expiresInDays, member }
+//
+// 三条安全纪律（写死在代码里，别在后续迭代中丢掉）：
+//   ① 不区分「没有这个成员」和「口令错了」——统一 401「口令无效，请联系管理员」，
+//      否则别人拿一个名字去试，光看错误差异就能枚举出组织里有哪些人。
+//   ② 成员不存在时也要算一次哈希（DUMMY_SALT），让"查不到"和"口令错"耗时接近，
+//      堵掉时序侧信道（不看错误信息、改看响应时间也能猜）。
+//   ③ 明文口令只出现在这一次调用的栈里：不写日志、不入库、不回给前端。
+const DUMMY_SALT = '00000000000000000000000000000000'; // 32 字符 hex，仅用于"空跑一次"对齐耗时
+
+// 只回传可以公开的字段。salt / identity_key 绝不出站 —— 它们一旦泄露，口令就离线可破。
+function publicMember(row) {
+  return {
+    id: row.id,
+    displayName: row.display_name || '',
+    role: row.role || 'member',
+    borderColor: row.border_color || null,
+    meetingNo: row.meeting_no || null,
+    meetingUrl: row.meeting_url || null,
+    note: row.note || null,
+  };
+}
+
+async function authLogin(event) {
+  const body = getBody(event);
+  const q = getQuery(event);
+  const pick = (k) => (body[k] != null ? body[k] : q[k]);
+  const name = String(pick('name') || '').trim();
+  const passcode = String(pick('passcode') || '');
+
+  // ★ 只记名字，绝不记口令（哪怕脱敏也不行，口令没有"部分可看"这回事）
+  console.log('[POST /api/auth/login] 收到请求: name=', name || '(空)');
+
+  if (!name) return { ok: false, data: null, error: { code: 400, message: '缺少必填字段：成员名称' } };
+  if (!passcode) return { ok: false, data: null, error: { code: 400, message: '缺少必填字段：口令' } };
+
+  // 1) 按名字定位成员（db.js 只认 auth_kind='passcode' 的口令成员，查不到返回 null）
+  const member = await db.findMemberByName(name);
+
+  // 2) 校验口令；查不到时也空跑一次 scrypt，对齐耗时（纪律②）
+  const ok = member
+    ? identity.verifyPasscode(passcode, member.salt, member.identity_key)
+    : (identity.hashPasscode(passcode, DUMMY_SALT), false);
+  if (!ok) {
+    console.log('[POST /api/auth/login] 口令校验失败（不区分成员是否存在）');
+    return { ok: false, data: null, error: { code: 401, message: identity.MSG.INVALID } };
+  }
+
+  // 3) 签发令牌（没配 WORKSHOP_AUTH_SECRET 时这里抛 503 —— 设计好的 fail-closed）
+  const token = identity.signToken(member);
+  console.log('[POST /api/auth/login] 登录成功 id=', member.id, ' name=', member.display_name);
+  return {
+    ok: true,
+    data: { token, expiresInDays: identity.TOKEN_TTL_DAYS, member: publicMember(member) },
+    error: null,
+  };
+}
+
+// —— 【阶段二 P6-②】成员身份：校验令牌 ——
+// 用途：刷新页面后前端还拿着令牌，用它换回"我是谁"，不必重新输口令。
+// ★ 与只读接口的区别：这里取不到令牌就直接拒绝；而 GET /api/items 取不到令牌是放行（向后兼容）。
+async function authVerify(event) {
+  const token = identity.readTokenFrom(event);
+  if (!token) {
+    return { ok: false, data: null, error: { code: 401, message: '未提供身份令牌，请先登录' } };
+  }
+  const payload = identity.verifyToken(token); // 签名错 / 过期都在这里抛 401
+  return {
+    ok: true,
+    data: {
+      member: { id: payload.mid, displayName: payload.name, role: payload.role },
+      expiresAt: new Date(payload.exp * 1000).toISOString(),
+    },
+    error: null,
+  };
+}
+
 // 真正的业务分发（原 exports.main 的本体）。外面再包一层，只为记一行请求日志。
 async function handle(event = {}) {
   const method = getMethod(event);
@@ -375,11 +463,45 @@ async function handle(event = {}) {
       headers: corsHeaders(event, {
         // 【Day 22】新增 PATCH / DELETE：浏览器发非简单请求前会先看预检结果里允不允许这两个方法
         'Access-Control-Allow-Methods': 'GET, POST, PATCH, PUT, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
+        // 【阶段二 P6-②】补 X-Member-Token：前端带自定义头属"非简单请求"，浏览器会先发预检。
+        // P6-① 探针②实测：Origin 在白名单时 CloudBase 网关会自己接管预检并回显请求头，
+        // 我们这段代码其实没被调用；但网关行为可能变，留在这里做兜底，成本为零。
+        'Access-Control-Allow-Headers': 'Content-Type, X-Member-Token',
         'Access-Control-Max-Age': '86400',
       }),
       body: '',
     };
+  }
+
+  // 【阶段二 P6-②】身份接口分发
+  // 怎么找到这两个接口，留了两条路，因为「网关把哪个路径路由给本函数」不由代码决定：
+  //   ① 路径：/api/auth/login 、/api/auth/verify（正常形态，前提是 HTTP 访问服务里加了对应路由）
+  //   ② _action：POST /api/items?_action=login（★兜底：/api/items 是确定已路由的入口，
+  //      万一 ① 那条路由没配上，这条照样能进门，不必为改一次路由再部署一轮）
+  // 两条路进的是同一段业务代码，行为完全一致。
+  const q0 = getQuery(event);
+  const b0 = getBody(event);
+  const action = String(q0._action || b0._action || '').trim().toLowerCase();
+  const p0 = reqPath(event);
+  const wantsLogin = action === 'login' || /\/auth\/login(\/|\?|$)/.test(p0);
+  const wantsVerify = action === 'verify' || /\/auth\/verify(\/|\?|$)/.test(p0);
+
+  if (wantsLogin && method === 'POST') {
+    try { return http(event, await authLogin(event)); }
+    catch (err) {
+      logError('POST /api/auth/login', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
+    }
+  }
+  // verify 是只读的、且请求体里可能带令牌，所以 GET / POST 都收
+  if (wantsVerify && (method === 'GET' || method === 'POST')) {
+    try { return http(event, await authVerify(event)); }
+    catch (err) {
+      logError('GET /api/auth/verify', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
+    }
   }
 
   // 【Day 22】编辑事项：PATCH（部分更新）为主，PUT 走同一套逻辑（契约登记为 PATCH，PUT 兼容旧写法）
