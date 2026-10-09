@@ -23,7 +23,7 @@
 
 | 编号 | 决策项 | 结论 |
 |---|---|---|
-| **A** | 身份怎么做 | **首选方案 3：微信 / 腾讯文档身份**；**降级方案 2：口令 / 邀请码**（服务端校验，能挡冒名） |
+| **A** | 身份怎么做 | **本期落地 = 口令 / 邀请码**（服务端校验，能挡冒名）；微信路线经 P6 探针确认个人主体无法获取 AppID+AppSecret，**归档 v1.2** |
 | **B** | 协作载体 | **用 CloudBase**（现有 PG 扩展成员表 + 归属字段）；**预留腾讯文档接口**，后续导出走它 |
 | **C** | 周期 | **14 天** |
 | **D** | 腾讯会议 | ✅ **定为方案①：固定个人会议号 / 个人会议链接**（零费用、零 API、零审批）。真调创建会议 API 列为 **v1.2 升级项**——官方能力梯度：免费版不可调用，需专业版（个人）起 + 高级账号 |
@@ -50,7 +50,7 @@
 | **P2** | 阶段二 PRD：范围、优先级、明确不做 | `PRD_phase2.md` | Day 4 |
 | **P3** | 技术设计：身份/归属/权限/同步/会议预约链路 | `TECH_DESIGN_phase2.md` | Day 5 |
 | **P4** | 阶段二规则：`_phase2` 后缀、改前备份、不动 v1.0 线上 | `AGENTS_phase2.md` | Day 6 |
-| **P5** | 数据层：成员表 + 归属字段 + 会议字段 + 文档字段（只加不改） | `db/schema_phase2.sql` | Day 16 |
+| **P5** | 数据层：成员表 + 归属/会议字段（只加不改）；腾讯文档留字段沿用既有 `external_id`（`doc_url`/`synced_at` 推迟到 A8 再落） | `db/schema_phase2.sql` | Day 16 |
 | **P6** | 身份落地：优先微信，**未就绪则降级口令/邀请码** | `source/cloud/identity_phase2/` | Day 17–19 |
 | **P7** | ★ 里程碑①：**两个身份各建一条，能区分"谁的"** | 线上可验 | Day 7 |
 | **P8** | 归属视图 + **协作外框色 `borderColor`**（填充色仍 = 类型色） | 前端增量 | §6.1 |
@@ -94,13 +94,15 @@
 
 ---
 
-## 八、当前状态
+## 八、当前状态（2026-10-09 刷新）
 
-- ✅ 规划已定（本文档）
-- ✅ **P1 需求研究已完成** → `research_phase2.md`（2026-10-06）
-- ✅ **P2 阶段二 PRD 已完成** → `PRD_phase2.md`（2026-10-06）
-- ✅ **P3 技术设计已完成** → `TECH_DESIGN_phase2.md`（2026-10-06）
-- ✅ **P4 阶段二规则已完成** → `AGENTS_phase2.md`（2026-10-06）
-- ⬜ **P5 数据层**：`db/schema_phase2.sql`（只加不改）—— 等你一句「进入下一板块」开工
-- ⚠️ v1.0 的两个 commit（`eafec4a` Day 27 / `b26d6bb` Day 28）**未推送**，需你手动 `git push origin main`
-- ⚠️ 阶段二新增的 `PLAN_phase2.md` / `research_phase2.md` / `PRD_phase2.md` 尚未提交
+> ⚠️ 本段曾长期与磁盘实际进度不符。以下为 2026-10-09 对账后的真实状态（依据 `git status` + 文件核查，非口头结论）。
+
+- ✅ P1–P4 文档全部完成（research / PRD / TECH_DESIGN / AGENTS_phase2）
+- ✅ **P5 数据层**：`db/schema_phase2.sql` 已写好（幂等 ALTER/CREATE：items+6 列、members_phase2、audit_phase2），**尚未在线上执行**（需控制台跑 SQL）
+- ✅ **P6 身份**：`identity_phase2.js` + `items` 云函数接入（index/db/errors 加登录校验接口、成员表读写、X-Member-Token CORS）+ `gen_member_phase2.js` 与两份本地验证脚本，**尚未部署**
+- ✅ 阶段二上述文件已于 `9374cb3`（P5,P6）**本地提交**（commit 未推送）
+- ⬜ **P7 里程碑**（两个身份各建一条、能区分「谁的」）—— 依赖 P5+P6 上线，未开始
+- ⬜ P8–P14 未开始（`acl_phase2.js` / `export_phase2` / `trial_phase2.md` 均未建；前端归属视图未实质完成）
+- ⚠️ **v1.0 的两个 commit（`eafec4a` Day 27 / `b26d6bb` Day 28）仍未推送**，需你手动 `git push origin main`（本机 TLS 常被掐断，勿循环重试）
+- 📌 未纳入本次提交的两处：`resource/_tmp_ls.txt`（临时 ls 残留，非交付物，已排除）、`resource/day24-before.log`（已跟踪的日志，按规则不提交）
