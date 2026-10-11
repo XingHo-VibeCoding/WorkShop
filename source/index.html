@@ -23,6 +23,7 @@
            来源：第三方试用时用户想确认"刚才那条是不是真的存住了"，却找不到任何入口（只能按 F5）。
            与内部检查台 check.html 的「刷新数据」对齐。 -->
       <button id="btn-refresh" title="重新从云端拉取最新数据（正常增删改后会自动更新，这里只是手动兜底）">↻ 刷新</button>
+      <span id="identity-zone" class="identity-zone"></span>
     </div>
   </header>
 
@@ -181,6 +182,34 @@
     <span id="stat-sync">同步状态：本地内存（未接入腾讯文档）</span>
   </footer>
 
+  <!-- 阶段二 P8：成员登录弹窗 -->
+  <div class="modal-overlay" id="login-modal" hidden>
+    <div class="modal login-card" role="dialog" aria-modal="true" aria-labelledby="login-title">
+      <div class="modal-head login-head">
+        <h2 id="login-title">成员登录</h2>
+        <button class="modal-close" id="login-close" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body login-body">
+        <p class="login-sub">登录后，你新建 / 修改的日程会带上你的归属标记，便于多人协作时区分「谁的」。</p>
+        <form id="login-form" autocomplete="on">
+          <label class="login-field">
+            <span class="login-label">成员名称</span>
+            <input id="login-name" type="text" autocomplete="username" placeholder="如 张三" aria-label="成员名称">
+          </label>
+          <label class="login-field">
+            <span class="login-label">口令</span>
+            <input id="login-pass" type="password" autocomplete="current-password" placeholder="请输入口令" aria-label="口令">
+          </label>
+          <p class="login-error" id="login-error" role="alert"></p>
+          <div class="login-actions">
+            <button type="button" class="ghost" id="login-cancel">取消</button>
+            <button type="submit" class="primary" id="login-submit">登录</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
   <!-- 删除确认弹窗（Day 11）：复用设置弹窗模板，主版 / PreText 版共用同一份 DOM -->
   <div class="modal-overlay" id="delete-modal" hidden>
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="delete-title">
@@ -196,6 +225,7 @@
 
   <!-- [Day 24] 时间拨轮：无依赖，须在 timeline.js 之前加载 -->
   <script src="js/timepicker.js"></script>
+  <script src="js/login_phase2.js"></script>
   <script src="js/timeline.js"></script>
   <script src="js/router.js"></script>
   <script src="js/animations.js"></script>

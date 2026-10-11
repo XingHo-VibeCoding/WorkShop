@@ -150,6 +150,18 @@ function getISOWeek(timeStr) {
   return `${year}-W${String(week).padStart(2, '0')}`;
 }
 
+// 【阶段二 P8】从请求解登录成员：读 X-Member-Token → verifyToken；无令牌/坏令牌返回 null（不强制登录）。
+// 仅用于写路径归属标记（owner_member_id / created_by / updated_by）。未登录时这些列保持 NULL，与 v1.0 一致。
+function resolveLogin(event) {
+  try {
+    const t = identity.readTokenFrom(event);
+    if (!t) return null;
+    return identity.verifyToken(t); // { mid, name, role, exp }
+  } catch (_) {
+    return null;
+  }
+}
+
 // —— 新建事项（POST /api/items，Day 18 逻辑，Day 19 改为调 DAL）——
 async function createItem(event) {
   const t0 = Date.now();
@@ -203,6 +215,16 @@ async function createItem(event) {
     source: 'manual',
     status: 'scheduled',
   };
+  // 【阶段二 P8】归属写入：令牌存在时把登录成员记为归属人/创建人；缺省保持 NULL（兼容 v1.0）。
+  // owner_member_id / created_by 必须由后端从令牌解（不可信前端，防伪造归属）；border_color 是冗余展示色，由前端随 body 带。
+  const _lm = resolveLogin(event);
+  if (_lm) {
+    row.owner_member_id = _lm.mid;
+    row.created_by = _lm.mid;
+    if (body.borderColor != null && String(body.borderColor).trim() !== '') {
+      row.border_color = String(body.borderColor).trim();
+    }
+  }
   console.log('[POST /api/items] 校验通过，准备写入 row(脱敏):', JSON.stringify({ ...row, attendees: row.attendees ? '***' : row.attendees }));
 
   // 3) 防重复提交：内容去重（调 DAL）
@@ -326,6 +348,9 @@ async function patchItem(event) {
   }
   // 开始时间变了 → ISO 周要跟着重算，否则这条事项会从它所属那一周里"消失"
   if (patch.start_time) patch.week = getISOWeek(patch.start_time) || old.week;
+  // 【阶段二 P8】最后修改人：令牌存在时记 updated_by；缺省 NULL（兼容 v1.0）
+  const _lm2 = resolveLogin(event);
+  if (_lm2) patch.updated_by = _lm2.mid;
 
   // 5) 写入（调 DAL）
   const result = await db.updateItem(id, patch);

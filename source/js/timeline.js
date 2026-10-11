@@ -165,7 +165,7 @@ function loadItems(weekOffset = 0) {
   const sundayEnd = addDays(monday, 6);
   sundayEnd.setHours(23, 59, 0, 0);
   const url = `${API_BASE}/api/items?start=${encodeURIComponent(fmtAPITime(monday))}&end=${encodeURIComponent(fmtAPITime(sundayEnd))}`;
-  return fetch(url)
+  return fetch(url, { headers: (window.Auth ? window.Auth.withHeaders({}) : {}) })
     .then(async res => {
       let j = null;
       try { j = await res.json(); } catch (e) { /* 非 JSON 响应，走下方统一报错 */ }
@@ -206,6 +206,8 @@ function localItemToPayload(d) {
     venue: d.venue || '',
     note: d.note || '',
     ownerKey: d.ownerKey,
+    // 【阶段二 P8】冗余展示色：建日程时把当前登录成员的外框色带给后端写 items.border_color（安全非敏感）
+    borderColor: (window.Auth && window.Auth.currentMember() && window.Auth.currentMember().borderColor) || '',
   };
 }
 
@@ -215,7 +217,7 @@ async function apiMutate(method, url, body) {
   try {
     res = await fetch(url, {
       method,
-      headers: { 'Content-Type': 'application/json' },
+      headers: (window.Auth ? window.Auth.withHeaders({ 'Content-Type': 'application/json' }) : { 'Content-Type': 'application/json' }),
       body: body ? JSON.stringify(body) : undefined,
     });
   } catch (e) {
@@ -255,17 +257,22 @@ const deletedIds = new Set();
 
 // =================== [Day 12] 筛选状态：类型 + 关键词（纯前端过滤，不依赖后端）===================
 // frontend-guidelines §2: 筛选不改变类型色语义；§7: 控件 aria-label 由 HTML 提供、键盘可达
-let filterState = { type: 'all', keyword: '' };
+let filterState = { type: 'all', keyword: '', owner: null };
+// 【阶段二 P8】归属视图：顶栏"只看我的"切换 → 设/清 filterState.owner；render 即时过滤
+function setOwnerFilter(id) { filterState.owner = id; render(); }
+window.setOwnerFilter = setOwnerFilter;
 
 // 在三模式 view 之上再叠加筛选（类型 + 关键词）；无条件时原样返回，不破坏现有渲染
 function applyFilter(list) {
-  const { type, keyword } = filterState;
+  const { type, keyword, owner } = filterState;
   const kw = keyword.trim().toLowerCase();
-  if (type === 'all' && !kw) return list;
+  if (type === 'all' && !kw && owner == null) return list;
   return list.filter(it => {
     const typeOk = type === 'all' || it.type === type;
     const kwOk = !kw || String(it.title || '').toLowerCase().includes(kw);
-    return typeOk && kwOk;
+    // 【阶段二 P8】归属视图：owner = 当前登录 member id 时只留"我的"
+    const ownerOk = owner == null || it.ownerMemberId === owner;
+    return typeOk && kwOk && ownerOk;
   });
 }
 
@@ -299,6 +306,8 @@ function renderItemCard(item, opts = {}) {
   const m = markOf(item);
   const el = document.createElement('div');
   el.className = `item type-${item.type}`;
+  // 【阶段二 P8】协作外框色：用成员 borderColor 标"谁的项"；填充色仍是类型色（颜色铁律，不变）
+  if (item.borderColor) el.style.borderColor = item.borderColor;
   el.dataset.id = item.id;
   el.tabIndex = 0; // 可聚焦：键盘 Tab 到卡片即显示备注浮窗（聚焦即生效）
   // 排版：标记+标题 同行 → 时间 一行（备注移入 hover/focus 浮窗，不再挤占最矮卡片高度）
@@ -918,7 +927,7 @@ function showDetail(item) {
     ? `<span class="owner-mark">${markHTML(m)} ${esc(m.name)}</span>`
     : `<span class="owner-mark">${markHTML(m)} ${esc(m.name)}</span>`;
   body.innerHTML = `
-    <div class="detail-card">
+    <div class="detail-card" style="border:2px solid ${item.borderColor || 'transparent'}">
       <h3>${esc(item.title)}</h3>
       <p class="row">
         <span class="badge table-${item.table}">${tableLabel}</span>
@@ -926,6 +935,7 @@ function showDetail(item) {
         ${ownerHTML}
       </p>
       <p class="row"><b>时间</b>${fmtMD(item.start)} ${item.startTime}–${item.endTime}</p>
+      <p class="row"><b>归属</b>${item.ownerMemberId ? ('成员 #' + item.ownerMemberId + (item.borderColor ? ' <span class="owner-swatch" style="background:' + item.borderColor + '"></span>' : '')) : '<span style="color:var(--ink-soft)">未标注</span>'}</p>
       <p class="row"><b>参与人</b>${esc(item.attendees)}</p>
       <p class="row"><b>场地</b>${esc(item.venue)}</p>
       <p class="row"><b>备注</b>${item.note ? esc(item.note) : '<span style="color:var(--ink-soft)">—</span>'}</p>

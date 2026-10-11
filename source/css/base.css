@@ -113,6 +113,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .item.type-sport { background: var(--c-sport); }
 .item.type-life { background: var(--c-life); }
 .item .item-time { font-size: 11px; opacity: .92; display: block; margin-top: 1px; }
+.item { border: 2px solid transparent; } /* 【阶段二 P8】协作外框色默认透明；有 borderColor 时显示成员外框（填充色仍是类型色） */
 .item:hover { filter: brightness(1.06); box-shadow: 0 2px 8px rgba(16,24,40,.18); transform: translateY(-1px); }
 
 /* 重叠提醒：工作=冲突(红)，日常=提醒(橙虚线)，跨表=紫 */
@@ -322,6 +323,82 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .modal-overlay { position: fixed; inset: 0; background: rgba(16,24,40,.45); display: flex; align-items: center; justify-content: center; z-index: 50; padding: 16px; }
 /* 关键：作者样式 display:flex 会盖掉 UA 的 [hidden]{display:none}，必须显式补一条，否则 hidden 失效、弹窗常驻且关不掉 */
 .modal-overlay[hidden] { display: none; }
+
+/* 阶段二 P8：顶栏身份区 + 登录 / 归属标识 */
+.identity-zone { display: inline-flex; align-items: center; gap: 6px; margin-left: 4px; }
+.id-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ink); }
+.id-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; border: 1px solid rgba(0,0,0,.15); }
+.id-btn { padding: 5px 10px; font-size: 12px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--ink); cursor: pointer; transition: .15s; }
+.id-btn:hover { border-color: var(--accent); color: var(--accent); }
+.id-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.id-btn.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.owner-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: middle; border: 1px solid rgba(0,0,0,.15); margin-left: 2px; }
+
+/* 阶段二 P8：登录弹窗加大（用户反馈偏窄偏矮） */
+/* 阶段二 P8：登录弹窗（独立样式，不影响其它弹窗） */
+#login-modal .modal.login-card {
+  width: 384px;
+  max-width: calc(100vw - 32px);
+  border-radius: 14px;
+  padding: 0;
+  overflow: hidden;
+}
+#login-modal .login-head {
+  padding: 22px 24px 0;
+  border-bottom: none;
+  cursor: default;        /* 登录框不拖动，去掉 grab 手型 */
+  user-select: none;
+}
+#login-modal .login-head h2 { font-size: 18px; font-weight: 700; }
+#login-modal .login-body { padding: 6px 24px 24px; }
+#login-modal .login-sub {
+  margin: 6px 0 22px;
+  font-size: 13px; line-height: 1.55; color: var(--ink-soft);
+}
+#login-modal .login-form { display: flex; flex-direction: column; gap: 16px; }
+#login-modal .login-field { display: flex; flex-direction: column; gap: 7px; }
+#login-modal .login-label { font-size: 13px; font-weight: 600; color: var(--ink); }
+#login-modal .login-field input {
+  width: 100%;
+  padding: 11px 13px;
+  font-size: 15px;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  transition: border-color .15s, box-shadow .15s;
+}
+#login-modal .login-field input::placeholder { color: #aab0b8; }
+#login-modal .login-field input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(29,78,216,.15);
+  outline: none;
+}
+#login-modal .login-error {
+  margin: -2px 0 0;
+  min-height: 18px;
+  font-size: 13px; line-height: 1.4;
+  color: var(--warn);
+}
+#login-modal .login-error:empty { min-height: 0; margin: 0; }
+#login-modal .login-actions {
+  display: flex; justify-content: flex-end; gap: 10px;
+  margin-top: 6px;
+}
+#login-modal .login-actions button {
+  padding: 10px 22px; font-size: 14px; border-radius: 9px; cursor: pointer;
+}
+#login-modal .login-actions .ghost {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink-soft);
+}
+#login-modal .login-actions .ghost:hover { background: var(--bg); }
+#login-modal .login-actions .primary {
+  background: var(--accent); border: 1px solid var(--accent); color: #fff; font-weight: 600;
+}
+#login-modal .login-actions .primary:hover:not(:disabled) { background: #1746b8; border-color: #1746b8; }
+#login-modal .login-actions .primary:disabled { opacity: .6; cursor: default; }
 .modal { width: 480px; max-width: 100%; max-height: 86vh; background: var(--panel); border-radius: 12px; box-shadow: 0 12px 40px rgba(16,24,40,.25); display: flex; flex-direction: column; overflow: hidden; }
 .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--line); cursor: grab; user-select: none; touch-action: none; }
 .modal-head:active { cursor: grabbing; }
