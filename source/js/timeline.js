@@ -154,6 +154,10 @@ function apiItemToLocal(a) {
     venue: a.venue || '',
     note: a.note || '',
     ownerKey: a.ownerKey,
+    // 【阶段二 P8·修复】必须映射后端已返回的归属/外框色：漏接会导致
+    // 「只看 X 的」过滤恒为 undefined===owner（全部过滤掉）且卡片外框色不渲染。
+    ownerMemberId: a.ownerMemberId != null ? Number(a.ownerMemberId) : null,
+    borderColor: a.borderColor || '',
   };
 }
 
@@ -270,8 +274,8 @@ function applyFilter(list) {
   return list.filter(it => {
     const typeOk = type === 'all' || it.type === type;
     const kwOk = !kw || String(it.title || '').toLowerCase().includes(kw);
-    // 【阶段二 P8】归属视图：owner = 当前登录 member id 时只留"我的"
-    const ownerOk = owner == null || it.ownerMemberId === owner;
+    // 【阶段二 P8】归属视图：owner = 当前登录 member id 时只留"我的"（归一化防类型不符）
+    const ownerOk = owner == null || Number(it.ownerMemberId) === Number(owner);
     return typeOk && kwOk && ownerOk;
   });
 }
