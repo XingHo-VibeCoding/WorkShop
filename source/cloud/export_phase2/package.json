@@ -1,0 +1,7 @@
+{
+  "name": "export_phase2",
+  "version": "1.0.0",
+  "description": "WorkShop 阶段二 P10 · 腾讯文档导出云函数（A8 骨架预留）",
+  "main": "index.js",
+  "private": true
+}

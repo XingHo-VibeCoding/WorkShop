@@ -1620,7 +1620,10 @@ function importOwners(file) {
   r.readAsText(file);
 }
 function exportData() {
-  downloadJSON({ version: 1, items: items.map(it => ({ ...it, start: it.start.toISOString() })) }, 'workshop-schedule.json');
+  // [阶段二 P10] 设置弹窗的「导出全部日程」改为走全量导出模块（云端全量，CSV/JSON 统一）
+  window.Export2.exportItems('json')
+    .then(r => { if (r.ok) showToast('已导出 ' + r.count + ' 条日程（JSON）'); })
+    .catch(e => showToast('导出失败：' + e.message));
 }
 function importData(file) {
   const r = new FileReader();
@@ -1651,6 +1654,35 @@ document.getElementById('btn-import-data').addEventListener('click', () => docum
 document.getElementById('file-import-data').addEventListener('change', e => { if (e.target.files[0]) importData(e.target.files[0]); e.target.value = ''; });
 // 顶部「导入」按钮：同样走 JSON 导入（图片/Excel 识别待第 3 周 OCR 接入）
 document.getElementById('btn-import').addEventListener('click', () => document.getElementById('file-import-data').click());
+
+// [阶段二 P10] 顶栏「导出 ▾」下拉：CSV / JSON / 腾讯文档
+const btnExport = document.getElementById('btn-export');
+const exportMenu = document.getElementById('export-menu');
+if (btnExport && exportMenu) {
+  btnExport.addEventListener('click', (e) => { e.stopPropagation(); exportMenu.hidden = !exportMenu.hidden; });
+  document.addEventListener('click', (e) => {
+    if (!exportMenu.hidden && !exportMenu.contains(e.target) && e.target !== btnExport) exportMenu.hidden = true;
+  });
+  const expCsv = document.getElementById('export-csv');
+  const expJson = document.getElementById('export-json');
+  const expDoc = document.getElementById('export-doc');
+  if (expCsv) expCsv.addEventListener('click', async () => {
+    exportMenu.hidden = true;
+    try { const r = await window.Export2.exportItems('csv'); showToast('已导出 ' + r.count + ' 条日程（CSV）'); }
+    catch (e) { showToast('导出失败：' + e.message); }
+  });
+  if (expJson) expJson.addEventListener('click', async () => {
+    exportMenu.hidden = true;
+    try { const r = await window.Export2.exportItems('json'); showToast('已导出 ' + r.count + ' 条日程（JSON）'); }
+    catch (e) { showToast('导出失败：' + e.message); }
+  });
+  if (expDoc) expDoc.addEventListener('click', async () => {
+    exportMenu.hidden = true;
+    const r = await window.Export2.exportToTencentDoc();
+    if (r.ok) showToast('已生成腾讯文档：' + r.url);
+    else showToast(r.message || '腾讯文档导出失败');
+  });
+}
 
 // ---- 弹窗可拖动（标题栏为手柄，鼠标/触摸通用，边界防拖出屏幕）----
 function makeDraggable(panel, handle) {

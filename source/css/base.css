@@ -806,3 +806,21 @@ body { display: flex; flex-direction: column; height: 100vh; }
   .tp-overlay.is-open, .tp.is-open, .tp.tp--sheet.is-open { animation: none !important; transform: none !important; }
 }
 #toast[hidden] { display: none; }
+
+/* [阶段二 P10] 顶栏「导出」下拉菜单 */
+.topbar .actions { position: relative; }
+.export-menu {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 60;
+  display: flex; flex-direction: column; min-width: 168px;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; box-shadow: 0 8px 24px rgba(16,24,40,.16); padding: 4px;
+}
+.export-menu[hidden] { display: none; }
+.export-menu button {
+  text-align: left; background: none; border: none; padding: 9px 12px;
+  border-radius: 6px; cursor: pointer; font: inherit; font-size: 13px; color: var(--ink); margin: 0;
+}
+.export-menu button:hover { background: rgba(16,24,40,.06); }
+@media (max-width: 768px) {
+  .export-menu { right: auto; left: 0; }
+}

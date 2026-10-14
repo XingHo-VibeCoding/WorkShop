@@ -110,6 +110,11 @@
   - 新增脚本：`add_member_phase2.js`（建成员/可指定 --role，打印 INSERT）、`verify-p9_phase2.js`（离线 ACL 单测 + `--live` 线上校验）。
   - **线上验收（2026-10-14，`verify-p9_phase2.js --live`，24 通过 0 失败）**：member 自建 200 且回带 updatedAtRaw / readonly 建+改他人项均 403 / 并发二次 PATCH 基版本过期 → 409（文案含"冲突"）/ 用新基版本刷新后 PATCH 200 / 代他人放置 ownerMemberId 落到目标且可被目标删除 / 测试项全部清理无残留。**证明 P9 后端（ACL + 并发）已真实上线，旧包返回 200 的问题已消除**。
   - 验收账号：`只读测试`(readonly，口令已重置为 `WsP9test2026`)、`P9测试A`/`P9测试B`(member，口令 `WsP9test2026`) 由 `add_member_phase2.js` 生成、控制台 SQL 建出，专供验收，可保留或后续删除。
-  - ⬜ 待办：提交 P9 文件（见下方未推送说明）。
-- ⚠️ 未推送提交：P9 文件尚未提交，当前 `origin/main..HEAD = 1`（`22ae1d8` P8 修复）；先前那批老提交已推送。P9 提交后再提醒你 `git push origin main`（本机 TLS 常被掐断，勿循环重试）。
-- 📌 持续未纳入提交：`resource/day24-before.log`（已跟踪的日志，按规则不提交）；本会话临时文件 `resource/temp_syntaxcheck.txt` / `temp_verify_p9.txt` 用完即删。
+  - ✅ P9 文件已本地提交 `b155293`（feat(phase2): P9 四类放置权限 + 并发容错）。
+- 🟡 **P10 腾讯文档导出预留 + 解备份缺口**（2026-10-14 代码完成、离线单测 15/0 通过，待部署+线上验收）：
+  - **A7（真能用）**：新增 `source/js/export_phase2.js`（CSV/JSON 纯函数 + 浏览器下载，含 UTF-8 BOM / 转义 / 归属显示名映射）；顶栏「导出 ▾」菜单（CSV / JSON / 腾讯文档），设置弹窗「导出全部日程」改走全量模块；`source/index.html` 加按钮+引入脚本、`source/css/base.css` 加下拉样式、`.env.example` 补 `TENCENT_DOC_TOKEN=` 占位。
+  - **A8（骨架预留）**：新增独立云函数 `source/cloud/export_phase2/index.js` + `package.json`，`POST /api/export/doc`；CORS 同 items；未配 `TENCENT_DOC_TOKEN` → 503「未配置腾讯文档凭据，请联系管理员」，配了 → 501 占位（不真调 MCP），**不污染 items 主链路**。
+  - 新增 `resource/scripts/verify-p10_phase2.js`（离线 CSV/JSON 单测 15/0 + `--live` export/doc 无 token→503 校验）。
+  - ⬜ 待办：部署静态（timeline.js / export_phase2.js / base.css / index.html）+ 独立云函数 export_phase2；跑 `verify-p10_phase2.js --live`；提交 P10 文件。
+- ⚠️ 未推送提交：P9 已提交 `b155293` 但未推送，当前 `origin/main..HEAD = 1`；P10 提交后再提醒你 `git push origin main`（本机 TLS 常被掐断，勿循环重试）。
+- 📌 持续未纳入提交：`resource/day24-before.log`（已跟踪的日志，按规则不提交）；`export_phase2` 为新目录、P10 文件待提交。

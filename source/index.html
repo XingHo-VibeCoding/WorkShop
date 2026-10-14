@@ -19,6 +19,13 @@
       <button id="btn-new" class="primary">+ 新建</button>
       <button id="btn-settings" title="打开设置：自定义部门、标记、类型颜色、默认视图、导入导出">设置</button>
       <button id="btn-import" title="导入日程（JSON）；图片/Excel 识别待第 3 周 OCR 接入">导入</button>
+      <!-- [阶段二 P10] 顶栏「导出」下拉：CSV / JSON / 腾讯文档 -->
+      <button id="btn-export" title="导出日程：CSV / JSON / 腾讯文档">导出 ▾</button>
+      <div id="export-menu" class="export-menu" hidden>
+        <button id="export-csv" type="button">导出 CSV</button>
+        <button id="export-json" type="button">导出 JSON</button>
+        <button id="export-doc" type="button">导出到腾讯文档</button>
+      </div>
       <!-- [Day 27] 手动刷新（后手，非主流程）：增删改后界面本已自动更新，此按钮只作兜底入口。
            来源：第三方试用时用户想确认"刚才那条是不是真的存住了"，却找不到任何入口（只能按 F5）。
            与内部检查台 check.html 的「刷新数据」对齐。 -->
@@ -226,6 +233,7 @@
   <!-- [Day 24] 时间拨轮：无依赖，须在 timeline.js 之前加载 -->
   <script src="js/timepicker.js"></script>
   <script src="js/login_phase2.js"></script>
+  <script src="js/export_phase2.js"></script>
   <script src="js/timeline.js"></script>
   <script src="js/router.js"></script>
   <script src="js/animations.js"></script>
