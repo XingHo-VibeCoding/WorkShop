@@ -94,15 +94,22 @@
 
 ---
 
-## 八、当前状态（2026-10-09 刷新）
+## 八、当前状态（2026-10-14 刷新）
 
-> ⚠️ 本段曾长期与磁盘实际进度不符。以下为 2026-10-09 对账后的真实状态（依据 `git status` + 文件核查，非口头结论）。
+> ⚠️ 本段曾长期与磁盘实际进度不符。以下为 2026-10-14 对账后的真实状态（依据 `git status` + 文件核查 + 离线单测 + 线上验收，非口头结论）。
 
 - ✅ P1–P4 文档全部完成（research / PRD / TECH_DESIGN / AGENTS_phase2）
-- ✅ **P5 数据层**：`db/schema_phase2.sql` 已写好（幂等 ALTER/CREATE：items+6 列、members_phase2、audit_phase2），**尚未在线上执行**（需控制台跑 SQL）
-- ✅ **P6 身份**：`identity_phase2.js` + `items` 云函数接入（index/db/errors 加登录校验接口、成员表读写、X-Member-Token CORS）+ `gen_member_phase2.js` 与两份本地验证脚本，**尚未部署**
-- ✅ 阶段二上述文件已于 `9374cb3`（P5,P6）**本地提交**（commit 未推送）
-- ⬜ **P7 里程碑**（两个身份各建一条、能区分「谁的」）—— 依赖 P5+P6 上线，未开始
-- ⬜ P8–P14 未开始（`acl_phase2.js` / `export_phase2` / `trial_phase2.md` 均未建；前端归属视图未实质完成）
-- ⚠️ **v1.0 的两个 commit（`eafec4a` Day 27 / `b26d6bb` Day 28）仍未推送**，需你手动 `git push origin main`（本机 TLS 常被掐断，勿循环重试）
-- 📌 未纳入本次提交的两处：`resource/_tmp_ls.txt`（临时 ls 残留，非交付物，已排除）、`resource/day24-before.log`（已跟踪的日志，按规则不提交）
+- ✅ **P5 数据层**：`db/schema_phase2.sql` 写好（幂等 ALTER/CREATE：items+6 列、members_phase2、audit_phase2）。`members_phase2` / `audit_phase2` 已在线上建表（P6 联调用）；items 6 列随 P8 上线。
+- ✅ **P6 身份**：`identity_phase2.js` + `items` 云函数接入（登录/校验接口、成员表读写、X-Member-Token CORS）+ `gen_member_phase2.js` / `reset_member_phase2.js` + 本地验证脚本，**已部署、线上可用**（见 P7）。
+- ✅ **P7 里程碑**：两个身份各建一条、能区分「谁的」+ 外框色显示，已提交 `f34006e` / `22ae1d8`（P8 修复 ownerMemberId/borderColor 映射）。
+- ✅ **P8 前端登录 + 归属视图**：登录弹窗、顶栏身份区、「只看 X 的」过滤、外框色，已提交 `22ae1d8`。
+- ✅ **P9 四类放置权限 + 并发容错**（2026-10-14 已完成：部署 + 线上验收 24/0 通过，待本地提交）：
+  - 后端：`acl_phase2.js`（决策表，离线 14/14 通过）、`db.js`（updatedAtRaw + 原子条件更新 updateItem + listMembers/findMemberById/insertAudit）、`index.js`（三处写路径拦截 + members 端点 + 审计留痕）。
+  - 前端：`login_phase2.js`（members()）、`timeline.js`（只读隐藏按钮 + 「归属给谁」下拉 + 409 冲突刷新重开）。
+  - **并发方案（用户明确要求）**：PATCH 把前端加载时的 `updatedAtRaw` 作为版本号，后端拼成 `updated_at=eq.<旧值>` 做数据库原子条件更新；被他人抢先改则 0 行命中 → 409，**从根本上消除 read-then-compare 竞争窗口**（不是乐观锁带竞态窗口的写法）。
+  - 新增脚本：`add_member_phase2.js`（建成员/可指定 --role，打印 INSERT）、`verify-p9_phase2.js`（离线 ACL 单测 + `--live` 线上校验）。
+  - **线上验收（2026-10-14，`verify-p9_phase2.js --live`，24 通过 0 失败）**：member 自建 200 且回带 updatedAtRaw / readonly 建+改他人项均 403 / 并发二次 PATCH 基版本过期 → 409（文案含"冲突"）/ 用新基版本刷新后 PATCH 200 / 代他人放置 ownerMemberId 落到目标且可被目标删除 / 测试项全部清理无残留。**证明 P9 后端（ACL + 并发）已真实上线，旧包返回 200 的问题已消除**。
+  - 验收账号：`只读测试`(readonly，口令已重置为 `WsP9test2026`)、`P9测试A`/`P9测试B`(member，口令 `WsP9test2026`) 由 `add_member_phase2.js` 生成、控制台 SQL 建出，专供验收，可保留或后续删除。
+  - ⬜ 待办：提交 P9 文件（见下方未推送说明）。
+- ⚠️ 未推送提交：P9 文件尚未提交，当前 `origin/main..HEAD = 1`（`22ae1d8` P8 修复）；先前那批老提交已推送。P9 提交后再提醒你 `git push origin main`（本机 TLS 常被掐断，勿循环重试）。
+- 📌 持续未纳入提交：`resource/day24-before.log`（已跟踪的日志，按规则不提交）；本会话临时文件 `resource/temp_syntaxcheck.txt` / `temp_verify_p9.txt` 用完即删。

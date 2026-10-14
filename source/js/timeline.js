@@ -118,6 +118,16 @@ function setState(s, msg) {
   if (sync) { sync.textContent = '同步状态：公网接口已连接（CloudBase items 表）'; sync.dataset.state = s; }
 }
 
+// 【阶段二 P9】只读身份：隐藏新建按钮（后端仍是最终审防线）；isReadOnly 供保存/删除多处复用
+function isReadOnly() {
+  const m = window.Auth && window.Auth.currentMember();
+  return !!(m && m.role === 'readonly');
+}
+function applyRoleUI() {
+  const btnNew = document.getElementById('btn-new');
+  if (btnNew) btnNew.hidden = isReadOnly();
+}
+
 // ---- [Day 20] 真实 API 接线：loadItems 从 mock 切换为调用公网接口 ----
 /* API 地址 = CloudBase HTTP 网关默认域名（Day 15 部署，路由 /api/items 在 Day 17 配置）。
    此地址为公开免鉴权路由，不含任何密钥；密钥（CB_API_KEY）只存在于云函数环境变量中。
@@ -158,6 +168,7 @@ function apiItemToLocal(a) {
     // 「只看 X 的」过滤恒为 undefined===owner（全部过滤掉）且卡片外框色不渲染。
     ownerMemberId: a.ownerMemberId != null ? Number(a.ownerMemberId) : null,
     borderColor: a.borderColor || '',
+    updatedAtRaw: a.updatedAtRaw != null ? String(a.updatedAtRaw) : null,  // 【阶段二 P9】并发版本号（与后端逐字一致）
   };
 }
 
@@ -212,6 +223,9 @@ function localItemToPayload(d) {
     ownerKey: d.ownerKey,
     // 【阶段二 P8】冗余展示色：建日程时把当前登录成员的外框色带给后端写 items.border_color（安全非敏感）
     borderColor: (window.Auth && window.Auth.currentMember() && window.Auth.currentMember().borderColor) || '',
+    // 【阶段二 P9】代他人放置：归属给谁（空=自己，由后端按令牌定）；编辑时带版本号做并发条件更新
+    ownerMemberId: (d.ownerMemberId != null && d.ownerMemberId !== '') ? Number(d.ownerMemberId) : undefined,
+    baseUpdatedAt: d.baseUpdatedAt || undefined,
   };
 }
 
@@ -951,10 +965,14 @@ function showDetail(item) {
     ${legendHTML()}`;
   document.getElementById('btn-edit').addEventListener('click', () => renderForm(item));
   document.getElementById('btn-delete').addEventListener('click', () => deleteItem(item.id));
+  if (isReadOnly()) {  // 【阶段二 P9】只读身份：详情里不显示编辑/删除按钮（后端仍是最终审防线）
+    const eb = document.getElementById('btn-edit'); if (eb) eb.hidden = true;
+    const db = document.getElementById('btn-delete'); if (db) db.hidden = true;
+  }
   openDetailDrawer(); // 移动端滑出底部抽屉（桌面端 .open 为空操作）
 }
 
-function renderForm(existing) {
+async function renderForm(existing) {
   const isEdit = !!existing;
   const tbl = existing ? existing.table : 'work';
   const monday = mondayOf(currentOffset);
@@ -975,6 +993,7 @@ function renderForm(existing) {
       <form id="item-form">
         <label>所属表<select name="table" id="f-table">${modeOpts}</select></label>
         <div id="f-owner" class="cond-field"><label>部门 / 成员<select name="ownerKey">${ownerOpts}</select></label></div>
+        ${isEdit ? '' : `<div id="f-forowner" class="cond-field"><label>归属给（代他人放置）<select name="ownerMemberId" id="f-forowner-sel"><option value="">自己</option></select></label></div>`}
         <label>标题<input name="title" value="${isEdit ? esc(existing.title) : ''}" required maxlength="40"></label>
         <label>类型<select name="type" id="f-type">${typeOptionsHTML(tbl, isEdit ? existing.type : 'meeting')}</select></label>
         <label>日期（本周）<select name="day">${dayOpts}</select></label>
@@ -1024,6 +1043,24 @@ function renderForm(existing) {
   fTable.addEventListener('change', syncCond);
   syncCond();
 
+  // 【阶段二 P9】新建时拉成员列表填"归属给谁"下拉（代他人放置）；失败不阻塞（默认自己）
+  if (!isEdit) {
+    const sel = document.getElementById('f-forowner-sel');
+    if (sel) {
+      try {
+        const members = (window.Auth && typeof window.Auth.members === 'function') ? await window.Auth.members() : [];
+        const me = window.Auth && window.Auth.currentMember();
+        members.forEach(m => {
+          if (me && m.id === me.id) return; // 跳过自己（"自己"选项已存在）
+          const o = document.createElement('option');
+          o.value = m.id;
+          o.textContent = (m.displayName || ('成员#' + m.id)) + (m.role === 'readonly' ? '（只读）' : '');
+          sel.appendChild(o);
+        });
+      } catch (_) { /* 忽略，默认自己 */ }
+    }
+  }
+
   // [板块B] 区间插入预览：选重复规则 + 结束日时，实时算出将生成多少条
   const fRepeat = document.getElementById('f-repeat');
   const fEnd = document.getElementById('f-enddate');
@@ -1072,6 +1109,7 @@ function matchRule(d, rule) {
 }
 
 async function saveItem(existing) {
+  if (isReadOnly()) { showToast('当前身份为只读，无法修改日程'); return; }
   const f = document.getElementById('item-form');
   const fd = new FormData(f);
   const table = fd.get('table');
@@ -1088,6 +1126,7 @@ async function saveItem(existing) {
     note: fd.get('note').trim(),
     start,
     ownerKey: table === 'work' ? fd.get('ownerKey') : 'me',
+    ownerMemberId: fd.get('ownerMemberId') || '',  // 【阶段二 P9】代他人放置的目标成员 id（空=自己）
   };
 
   // ---- 越界①/②：前端先挡一道，后端还有 400/422 兜底（双保险，省一次往返）----
@@ -1135,6 +1174,8 @@ async function saveItem(existing) {
       showToast('已保存（此项没有云端 id，仅修改本页显示）');
       return;
     }
+    data.baseUpdatedAt = existing.updatedAtRaw; // 【阶段二 P9】带加载时的版本号，被他人抢先改则 409
+    const payload = localItemToPayload(data);
     try {
       const updated = await apiMutate('PATCH', `${API_BASE}/api/items?id=${existing.id}`, payload);
       Object.assign(existing, apiItemToLocal(updated));  // 用库里返回的最新值回写（含 week 重算、updatedAt）
@@ -1142,7 +1183,15 @@ async function saveItem(existing) {
       afterMutation();
       showToast('已保存（已同步云端）');
     } catch (e) {
-      // 越界③：保存失败不动内存、不关表单，让用户改完再试（避免"界面说成功、库里没改"）
+      // 【阶段二 P9】并发冲突：已有人改过，刷新本页并重新打开该条，让用户基于最新值再改
+      if (e.code === 409) {
+        showToast('数据已被他人修改，已为你刷新，请基于最新内容再保存');
+        await bootstrap();
+        const fresh = items.find(x => x.id === existing.id);
+        if (fresh) showDetail(fresh);
+        return;
+      }
+      // 越界③：其他保存失败不动内存、不关表单，让用户改完再试（避免"界面说成功、库里没改"）
       showToast('保存失败：' + e.message);
     }
     return;
@@ -1382,7 +1431,10 @@ function computeFreeTime(view) { /* TODO(设想②): 以半小时为单位统计
 document.getElementById('btn-prev-week').addEventListener('click', () => { currentOffset = Math.max(WEEK_MIN, currentOffset - 1); bootstrap(); });
 document.getElementById('btn-next-week').addEventListener('click', () => { currentOffset = Math.min(WEEK_MAX, currentOffset + 1); bootstrap(); });
 // 新建
-document.getElementById('btn-new').addEventListener('click', () => renderForm(null));
+document.getElementById('btn-new').addEventListener('click', () => {
+  if (isReadOnly()) { showToast('当前身份为只读，无法修改日程'); return; }
+  renderForm(null);
+});
 // 空状态「新建」
 document.getElementById('btn-empty-new').addEventListener('click', () => { setState('success'); renderForm(null); });
 // 错误状态「重试」
@@ -1422,6 +1474,7 @@ async function bootstrap() {
     items = data;
     setState(data.length ? 'success' : 'empty');
     render();
+    applyRoleUI();   // 【阶段二 P9】只读身份时隐藏新建按钮
     if (!data.length) showDetail(null);
   } catch (e) {
     setState('error', e.message || '日程数据加载出错，请重试。');

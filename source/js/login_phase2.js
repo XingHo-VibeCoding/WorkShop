@@ -64,6 +64,18 @@
     if (typeof window.bootstrap === 'function') window.bootstrap();
   }
 
+  // —— 【阶段二 P9】成员列表（供"归属给谁"下拉；只读，不含凭据）——
+  async function listMembers() {
+    try {
+      const r = await fetch(`${API_BASE}/api/items?_action=members`, { method: 'GET', headers: withHeaders({}) });
+      const j = await r.json().catch(() => null);
+      if (!r.ok || !j || !j.ok) return [];
+      return j.data || [];
+    } catch (_) {
+      return [];
+    }
+  }
+
   function escapeHtml(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
       ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -179,6 +191,7 @@
     login,
     verifyRestore,
     logout,
+    members: listMembers,
     renderIdentity,
     openLoginModal,
     closeLoginModal,

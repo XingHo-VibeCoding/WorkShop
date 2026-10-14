@@ -27,6 +27,9 @@ const { toUserError, logError } = require('./errors.js');
 //   理由：后续要通用化，按名字定位比全表逐一比对更容易扩展）。
 const identity = require('./identity_phase2.js');
 
+// —— 【阶段二 P9】应用层权限判定（决策表：TECH_DESIGN_phase2 §6.2 + PRD A5）——
+const acl = require('./acl_phase2.js');
+
 // —— 【Day 20 · CORS 配置】——
 // 浏览器跨域调用本接口时，响应必须带 Access-Control-Allow-Origin，否则被浏览器拦截。
 // 白名单只放行：生产静态托管域名 + 本地调试端口，禁止 * 通配符（Day 20 清单硬性要求）。
@@ -215,13 +218,30 @@ async function createItem(event) {
     source: 'manual',
     status: 'scheduled',
   };
-  // 【阶段二 P8】归属写入：令牌存在时把登录成员记为归属人/创建人；缺省保持 NULL（兼容 v1.0）。
-  // owner_member_id / created_by 必须由后端从令牌解（不可信前端，防伪造归属）；border_color 是冗余展示色，由前端随 body 带。
+  // 【阶段二 P9】权限判定 + 归属写入。
+  // owner_member_id / created_by 必须由后端从令牌解（不可信前端，防伪造归属）。
   const _lm = resolveLogin(event);
+  let _placeForTarget = null;   // 给他人放时的目标成员 id（用于写留痕）
+  let _placeForName = '';
   if (_lm) {
-    row.owner_member_id = _lm.mid;
+    const targetOwnerId = body.ownerMemberId != null && String(body.ownerMemberId).trim() !== ''
+      ? Number(body.ownerMemberId) : null;
+    const dec = acl.decideWrite(_lm, { op: 'create', targetOwnerId });
+    if (!dec.ok) {
+      return { ok: false, data: null, error: { code: dec.code, message: dec.message } };
+    }
+    row.owner_member_id = dec.ownerMemberId;
     row.created_by = _lm.mid;
-    if (body.borderColor != null && String(body.borderColor).trim() !== '') {
+    if (dec.placeFor) {
+      // ② 给他人放：校验目标成员真实存在，并取【库里】的外框色（防前端冒充颜色），随后写留痕
+      const target = await db.findMemberById(dec.ownerMemberId);
+      if (!target) {
+        return { ok: false, data: null, error: { code: 400, message: '目标成员不存在，无法代为放置' } };
+      }
+      row.border_color = target.borderColor || null;
+      _placeForTarget = target.id;
+      _placeForName = target.displayName;
+    } else if (body.borderColor != null && String(body.borderColor).trim() !== '') {
       row.border_color = String(body.borderColor).trim();
     }
   }
@@ -237,6 +257,15 @@ async function createItem(event) {
   // 4) 写入（调 DAL）
   const result = await db.insertItem(row);
   if (result.error) return { ok: false, data: null, error: result.error };
+  // 【阶段二 P9】留痕：登录用户的所有创建都记一笔；代他人放置记为 place_for（A5②）
+  if (_lm) {
+    await db.insertAudit({
+      itemId: result.item.id, actorId: _lm.mid,
+      action: _placeForTarget != null ? 'place_for' : 'create',
+      targetId: _placeForTarget,
+      detail: _placeForTarget != null ? `代 ${_placeForName} 放置：${title}` : `创建：${title}`,
+    });
+  }
   console.log('[POST /api/items] 写入成功 id=', result.item.id, '耗时', Date.now() - t0, 'ms');
   return { ok: true, data: result.item, error: null };
 }
@@ -336,6 +365,13 @@ async function patchItem(event) {
   const old = await db.findItemById(id);
   if (!old) return { ok: false, data: null, error: { code: 404, message: `找不到该事项：id=${id}` } };
 
+  // 【阶段二 P9】权限判定：patch（已登录才判定；未登录放行 = 兼容 v1.0）
+  const _lm2 = resolveLogin(event);
+  if (_lm2) {
+    const dec = acl.decideWrite(_lm2, { op: 'patch', item: old });
+    if (!dec.ok) return { ok: false, data: null, error: { code: dec.code, message: dec.message } };
+  }
+
   const newStart = patch.start_time || old.startTime;   // old.startTime 形如 '2026-09-30 15:00'
   const newEnd = patch.end_time || old.endTime;
   // 【Day 24 修复 B2】比较前两边都截到分钟：
@@ -349,13 +385,21 @@ async function patchItem(event) {
   // 开始时间变了 → ISO 周要跟着重算，否则这条事项会从它所属那一周里"消失"
   if (patch.start_time) patch.week = getISOWeek(patch.start_time) || old.week;
   // 【阶段二 P8】最后修改人：令牌存在时记 updated_by；缺省 NULL（兼容 v1.0）
-  const _lm2 = resolveLogin(event);
   if (_lm2) patch.updated_by = _lm2.mid;
 
+  // 【阶段二 P9】乐观并发：客户端带它加载时的 updatedAtRaw 作为版本号；
+  // updateItem 会把它拼成 updated_at=eq.<旧值> 做「原子」条件更新 —— 被他人抢先改则 0 行命中 → 409。
+  const baseUpdatedAt = body.baseUpdatedAt != null ? String(body.baseUpdatedAt) : null;
+
   // 5) 写入（调 DAL）
-  const result = await db.updateItem(id, patch);
+  const result = await db.updateItem(id, patch, baseUpdatedAt);
+  if (result.concurrent) return { ok: false, data: null, error: { code: 409, message: '数据已被他人修改，请刷新后再试（冲突）' } };
   if (result.notFound) return { ok: false, data: null, error: { code: 404, message: `找不到该事项：id=${id}` } };
   if (result.error) return { ok: false, data: null, error: result.error };
+  // 【阶段二 P9】留痕：登录用户的修改记一笔
+  if (_lm2) {
+    await db.insertAudit({ itemId: Number(id), actorId: _lm2.mid, action: 'update', detail: `修改字段：${Object.keys(patch).join(',')}` });
+  }
   console.log('[PATCH /api/items] 更新成功 id=', id, '改动字段', Object.keys(patch).join(','), '耗时', Date.now() - t0, 'ms');
   return { ok: true, data: result.item, error: null };
 }
@@ -389,10 +433,21 @@ async function removeItem(event) {
   const old = await db.findItemById(id);
   if (!old) return { ok: false, data: null, error: { code: 404, message: `找不到该事项：id=${id}（可能已被删除）` } };
 
+  // 【阶段二 P9】权限判定：delete（已登录才判定；未登录放行 = 兼容 v1.0）
+  const _lmD = resolveLogin(event);
+  if (_lmD) {
+    const dec = acl.decideWrite(_lmD, { op: 'delete', item: old });
+    if (!dec.ok) return { ok: false, data: null, error: { code: dec.code, message: dec.message } };
+  }
+
   const result = await db.deleteItem(id);
   if (result.notFound) return { ok: false, data: null, error: { code: 404, message: `找不到该事项：id=${id}（可能已被删除）` } };
   if (result.error) return { ok: false, data: null, error: result.error };
 
+  // 【阶段二 P9】留痕：登录用户的删除记一笔（硬删除下，审计表是唯一的删除线索）
+  if (_lmD) {
+    await db.insertAudit({ itemId: Number(id), actorId: _lmD.mid, action: 'delete', detail: `删除：${old.title}` });
+  }
   console.log('[DELETE /api/items] 删除成功 id=', id, '原标题:', old.title, '耗时', Date.now() - t0, 'ms');
   // 闸门C：把被删掉的内容原样带回（硬删除下这是唯一的"后悔药线索"）
   return { ok: true, data: { id: Number(id), deleted: true, item: old }, error: null };
@@ -524,6 +579,18 @@ async function handle(event = {}) {
     try { return http(event, await authVerify(event)); }
     catch (err) {
       logError('GET /api/auth/verify', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
+    }
+  }
+
+  // 【阶段二 P9】成员列表（供前端"归属给谁"下拉；只读，不含凭据）
+  if (action === 'members' && method === 'GET') {
+    try {
+      const list = await db.listMembers();
+      return http(event, { ok: true, data: list, error: null });
+    } catch (err) {
+      logError('GET /api/members', err);
       const e = toUserError(err);
       return http(event, { ok: false, data: null, error: e }, e.code);
     }

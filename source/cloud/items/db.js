@@ -117,6 +117,8 @@ function toItem(r) {
     ownerKey: r.owner_key,
     createdAt: fmtTime(r.created_at),
     updatedAt: fmtTime(r.updated_at),
+    // 【阶段二 P9】并发用原始时间戳（与 PostgREST 返回逐字一致，避免时区/精度错位导致条件更新误判）
+    updatedAtRaw: r.updated_at != null ? String(r.updated_at) : null,
     // 【阶段二 P6-②】新增字段（P5 迁移已建列）。缺省一律 null，老数据不受影响。
     // ★ 颜色分工：fill 由 type（日程类型）决定，borderColor 只管【人】的外框，二者不冲突。
     ownerMemberId: r.owner_member_id != null ? r.owner_member_id : null,
@@ -250,13 +252,18 @@ async function findItemById(id) {
   return rows.length ? toItem(rows[0]) : null;   // 查不到返回 null（由控制器翻成 404）
 }
 
-// —— 【Day 22】PATCH /api/items/:id 第 2 步 —— 按 id 更新（部分更新）——
-// ★ 必须带 `?id=eq.<具体值>` 过滤：PostgREST 的 PATCH 不带过滤条件会**整表更新**，
-//   这是"改"比"增"更危险的地方，所以这里把 id 拼进查询串，且由控制器保证 id 是正整数。
-// 返回：{ item } 成功 / { notFound: true } 该 id 不存在 / { error } 失败
-async function updateItem(id, patch) {
+// —— 【Day 22 / 阶段二 P9】PATCH /api/items/:id 第 2 步 —— 按 id 更新（部分更新）——
+// ★ 必须带 `?id=eq.<具体值>` 过滤：PostgREST 的 PATCH 不带过滤条件会**整表更新**。
+// 【阶段二 P9 并发】baseUpdatedAt 非空时，把 `updated_at=eq.<旧值>` 也作为过滤条件，
+//   让"版本比对"发生在数据库内部（原子），彻底堵住「读后比对」的竞态窗口——
+//   别人在我们读取之后、写入之前改了同一行，本条件命中 0 行 → 控制器返回 409 冲突。
+// 返回：{ item } 成功 / { notFound: true } id 不存在 / { concurrent: true } 版本不符（被他人抢先改） / { error }
+async function updateItem(id, patch, baseUpdatedAt) {
   const token = await getBearer();
-  const updRes = await fetch(`${GATEWAY}/v1/rdb/rest/items?id=eq.${encodeURIComponent(id)}`, {
+  const q = new URLSearchParams();
+  q.set('id', `eq.${encodeURIComponent(id)}`);
+  if (baseUpdatedAt) q.set('updated_at', `eq.${String(baseUpdatedAt)}`);   // ★ P9 并发条件（原子）
+  const updRes = await fetch(`${GATEWAY}/v1/rdb/rest/items?${q.toString()}`, {
     method: 'PATCH',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -281,7 +288,12 @@ async function updateItem(id, patch) {
     return { error: { code: updRes.status, message: `更新 items id=${id} 失败：${msg}` } };
   }
   const rows = Array.isArray(updJson) ? updJson : (updJson && updJson.data) || [];
-  if (!rows.length) return { notFound: true };   // 影响 0 行 = 这个 id 根本不存在
+  if (!rows.length) {
+    // 本函数调用前控制器已用 findItemById 确认 id 存在，故此处 0 行只可能是：
+    //   ① 带了 baseUpdatedAt 且被他人抢先改（updated_at 已变）→ 并发冲突；
+    //   ② 否则视为不存在。
+    return baseUpdatedAt ? { concurrent: true } : { notFound: true };
+  }
   return { item: toItem(rows[0]) };
 }
 
@@ -355,6 +367,102 @@ async function findMemberByName(displayName) {
   return rows.length ? rows[0] : null;   // 查不到返回 null，由调用方统一按"口令无效"处理（不泄露是否存在该成员）
 }
 
+// —— 【阶段二 P9】成员列表（供前端"归属给谁"下拉；不含任何凭据）——
+async function listMembers() {
+  const token = await getBearer();
+  const p = new URLSearchParams();
+  p.set('select', 'id,display_name,role,border_color');
+  p.set('auth_kind', 'eq.passcode');
+  p.set('order', 'id.asc');
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/members_phase2?${p.toString()}`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Accept': 'application/json',
+      'Accept-Profile': SCHEMA,
+      'Content-Profile': SCHEMA,
+    },
+  });
+  const text = await res.text();
+  let json;
+  try { json = JSON.parse(text); }
+  catch (e) { throw new Error(`查询成员列表返回非 JSON（HTTP ${res.status}）：${text.slice(0, 200)}`); }
+  if (!res.ok) {
+    const msg = (json && (json.message || json.error || json.error_description || json.hint)) || `HTTP ${res.status}`;
+    throw new Error(`查询成员列表失败：${msg}`);
+  }
+  const rows = Array.isArray(json) ? json : (json && json.data) || [];
+  return rows.map((r) => ({
+    id: r.id,
+    displayName: r.display_name || '',
+    role: r.role || 'member',
+    borderColor: r.border_color || null,
+  }));
+}
+
+// —— 【阶段二 P9】按 id 查单个成员（校验"给他人放"目标真实存在，并取库里的外框色，防前端冒充）——
+async function findMemberById(id) {
+  const n = Number(id);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  const token = await getBearer();
+  const p = new URLSearchParams();
+  p.set('select', 'id,display_name,role,border_color');
+  p.set('id', `eq.${n}`);
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/members_phase2?${p.toString()}`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Accept': 'application/json',
+      'Accept-Profile': SCHEMA,
+      'Content-Profile': SCHEMA,
+    },
+  });
+  const text = await res.text();
+  let json;
+  try { json = JSON.parse(text); }
+  catch (e) { throw new Error(`查询成员返回非 JSON（HTTP ${res.status}）：${text.slice(0, 200)}`); }
+  if (!res.ok) {
+    const msg = (json && (json.message || json.error || json.error_description || json.hint)) || `HTTP ${res.status}`;
+    throw new Error(`查询成员失败：${msg}`);
+  }
+  const rows = Array.isArray(json) ? json : (json && json.data) || [];
+  return rows.length
+    ? { id: rows[0].id, displayName: rows[0].display_name || '', role: rows[0].role || 'member', borderColor: rows[0].border_color || null }
+    : null;
+}
+
+// —— 【阶段二 P9】写操作留痕（audit_phase2，只追加）——
+// 失败只记日志、不阻断主流程（留痕是辅助，不能因为留痕挂了就让建/改/删也失败）。
+async function insertAudit({ itemId, actorId, action, targetId, detail }) {
+  const token = await getBearer();
+  const row = {
+    item_id: itemId != null ? Number(itemId) : null,
+    actor_id: actorId != null ? Number(actorId) : null,
+    action: String(action || 'create'),
+    target_id: targetId != null ? Number(targetId) : null,
+    detail: detail != null ? String(detail) : null,
+  };
+  try {
+    const res = await fetch(`${GATEWAY}/v1/rdb/rest/audit_phase2`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Accept-Profile': SCHEMA,
+        'Content-Profile': SCHEMA,
+        'Prefer': 'return=minimal',
+      },
+      body: JSON.stringify([row]),
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      console.error('[audit] 留痕写入失败 HTTP', res.status, t.slice(0, 200));
+    }
+  } catch (e) {
+    console.error('[audit] 留痕写入异常：', e && e.message);
+  }
+}
+
 module.exports = {
   queryItems,
   findDuplicate,
@@ -364,4 +472,8 @@ module.exports = {
   deleteItem,
   // 【阶段二 P6-②】
   findMemberByName,
+  // 【阶段二 P9】
+  listMembers,
+  findMemberById,
+  insertAudit,
 };
