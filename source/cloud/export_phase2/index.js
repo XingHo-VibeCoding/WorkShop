@@ -102,13 +102,10 @@ async function handle(event = {}) {
       body: '',
     };
   }
-  const q = getQuery(event);
-  const b = getBody(event);
-  const action = String(q._action || b._action || '').trim().toLowerCase();
-  const path = reqPath(event);
-  const wantsDoc = action === 'doc' || /\/export\/doc/.test(path);
-
-  if (wantsDoc && method === 'POST') {
+  // 【阶段二】P10 收尾（2026-10-15）：本函数仅承接「腾讯文档导出」一个出口。
+  // CloudBase HTTP 访问服务按挂载路径转发会剥前缀，函数收到的 path 未必是 /api/export/doc，
+  // 故不再依赖 path 正则匹配，直接以 method===POST 判定（单动作函数，POST 即导出）。
+  if (method === 'POST') {
     try { return http(event, await exportDoc(event)); }
     catch (err) {
       console.error('[export/doc] 异常', err && err.message);

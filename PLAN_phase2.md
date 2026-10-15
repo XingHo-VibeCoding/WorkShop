@@ -111,10 +111,15 @@
   - **线上验收（2026-10-14，`verify-p9_phase2.js --live`，24 通过 0 失败）**：member 自建 200 且回带 updatedAtRaw / readonly 建+改他人项均 403 / 并发二次 PATCH 基版本过期 → 409（文案含"冲突"）/ 用新基版本刷新后 PATCH 200 / 代他人放置 ownerMemberId 落到目标且可被目标删除 / 测试项全部清理无残留。**证明 P9 后端（ACL + 并发）已真实上线，旧包返回 200 的问题已消除**。
   - 验收账号：`只读测试`(readonly，口令已重置为 `WsP9test2026`)、`P9测试A`/`P9测试B`(member，口令 `WsP9test2026`) 由 `add_member_phase2.js` 生成、控制台 SQL 建出，专供验收，可保留或后续删除。
   - ✅ P9 文件已本地提交 `b155293`（feat(phase2): P9 四类放置权限 + 并发容错）。
-- 🟡 **P10 腾讯文档导出预留 + 解备份缺口**（2026-10-14 代码完成、离线单测 15/0 通过，待部署+线上验收）：
+- ✅ **P10 腾讯文档导出预留 + 解备份缺口**（2026-10-15 用户宣布完成：代码+部署+线上验收 18/0 全绿，404 真 bug 已根治）：
   - **A7（真能用）**：新增 `source/js/export_phase2.js`（CSV/JSON 纯函数 + 浏览器下载，含 UTF-8 BOM / 转义 / 归属显示名映射）；顶栏「导出 ▾」菜单（CSV / JSON / 腾讯文档），设置弹窗「导出全部日程」改走全量模块；`source/index.html` 加按钮+引入脚本、`source/css/base.css` 加下拉样式、`.env.example` 补 `TENCENT_DOC_TOKEN=` 占位。
   - **A8（骨架预留）**：新增独立云函数 `source/cloud/export_phase2/index.js` + `package.json`，`POST /api/export/doc`；CORS 同 items；未配 `TENCENT_DOC_TOKEN` → 503「未配置腾讯文档凭据，请联系管理员」，配了 → 501 占位（不真调 MCP），**不污染 items 主链路**。
   - 新增 `resource/scripts/verify-p10_phase2.js`（离线 CSV/JSON 单测 15/0 + `--live` export/doc 无 token→503 校验）。
-  - ⬜ 待办：部署静态（timeline.js / export_phase2.js / base.css / index.html）+ 独立云函数 export_phase2；跑 `verify-p10_phase2.js --live`；提交 P10 文件。
-- ⚠️ 未推送提交：P9 已提交 `b155293` 但未推送，当前 `origin/main..HEAD = 1`；P10 提交后再提醒你 `git push origin main`（本机 TLS 常被掐断，勿循环重试）。
+  - **部署（2026-10-14 晚实测）**：
+    - ✅ 静态托管：用户授权用 tcb，`tcb hosting deploy` 已成功上线 4 文件（index.html / timeline.js / export_phase2.js / base.css）到 `workshop/`。
+    - ❌ 云函数 `export_phase2`：**tcb 从本机部署走不通**（函数代码 COS 桶上传 ~5min 超时，连纯函数部署也卡；zip 模式又有 CLI 打包 bug 误报 >1.5MB）。已清掉两次 Creation failed 残留，并把函数目录打成 `resource/export_phase2.zip`（2.9KB）供**控制台上传**。
+    - ⬜ 待办（用户控制台）：云函数 → 新建/上传 `export_phase2.zip`（Nodejs18.15，入口 index.main）→ 开通 HTTP 访问服务、路径 `/api/export`。随后我跑 `verify-p10_phase2.js --live` 确认 export/doc→503。
+  - 📌 教训：**本机 tcb 只可靠部署静态托管；云函数代码上传因沙箱到函数 COS 桶网络不通，必须走控制台**。后续阶段二新云函数一律按此处理。
+- 🔧 **P10 收尾（2026-10-15 真 bug 修复）**：用户 10-15 凌晨 00:16 实际已控制台部署 `export_phase2`，但线上仍 404「未找到该接口」——根因是 CloudBase HTTP 访问服务剥前缀后函数收到的 path 不含 `/export/doc`，旧 `wantsDoc` 正则失配（前端按钮发空 body 同中招）。已改路由为「单动作函数 `method==='POST'` 即导出」（不依赖 path 正则），本地模拟 4 类事件全绿；但首版 zip 打包抓到旧内容、用户首次覆盖部署未生效，13:57 二次重打包解压核验确为修复版，用户 14:14 覆盖重部署后 `verify-p10_phase2.js --live` **18 通过 0 失败**，探针 `POST /api/export/doc` 空 body → 503「未配置腾讯文档凭据」✅。路由修复改动（`source/cloud/export_phase2/index.js`）**尚未提交**，待随本次归档一并 commit。
+- ⚠️ 未推送提交：当前 `origin/main..HEAD = 3`（`22ae1d8` P7/P8 修复 / `b155293` P9 / `823087e` P10）；另本次待提交：P10 路由修复 + 备份 + 归档 + PLAN 状态。提醒你 `git push origin main`（本机 TLS 常被掐断，勿循环重试）。
 - 📌 持续未纳入提交：`resource/day24-before.log`（已跟踪的日志，按规则不提交）；`export_phase2` 为新目录、P10 文件待提交。
