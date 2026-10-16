@@ -353,6 +353,39 @@ function v9() {
   return ok;
 }
 
+// V10 跨脚本顶层声明重名（经典脚本共享全局作用域的隐患）
+//   经典脚本（非 module）在同一页面共享全局作用域；若两个文件在「顶层（列0、未缩进）」
+//   声明了同名 const/let/var/function/class，后加载的文件会抛
+//   SyntaxError: Identifier 'X' has already been declared → 整个文件不执行。
+//   本项目曾因此事故：export_phase2.js 与 timeline.js 的顶层 const API_BASE 重名，
+//   导致 timeline.js 整份不执行、页面除登录外全部按钮失效（P11 期修复）。
+//   本检查扫描 index.html 实际加载的全部前端脚本，拦住这类"整文件静默失效"级回归。
+//   判定口径：只统计列 0（行首无空白）的声明——被 IIFE/函数包裹的声明必然缩进，不计入全局顶层。
+function v10() {
+  const jsDir = path.join(SOURCE_DIR, 'js');
+  const files = fs.existsSync(jsDir) ? fs.readdirSync(jsDir).filter((f) => f.endsWith('.js')) : [];
+  const declRe = /^(?:async\s+)?(?:function|class)\s+([A-Za-z_$][\w$]*)|^(?:const|let|var)\s+([A-Za-z_$][\w$]*)/;
+  const byName = {};
+  let scanned = 0;
+  for (const f of files) {
+    const lines = fs.readFileSync(path.join(jsDir, f), 'utf8').split('\n');
+    let topLevel = [];
+    for (const ln of lines) {
+      if (/^\s/.test(ln) || ln.trim() === '') continue; // 缩进或空行：属某作用域内部 / 非声明
+      const m = declRe.exec(ln);
+      if (m) topLevel.push(m[1] || m[2]);
+    }
+    if (topLevel.length) scanned++;
+    for (const n of topLevel) (byName[n] = byName[n] || []).push(f);
+  }
+  const dups = Object.entries(byName).filter(([, fs]) => fs.length > 1);
+  const ok = dups.length === 0;
+  check('V10', `跨脚本顶层声明无重名（扫描 ${scanned} 个含顶层声明的前端脚本）`, ok,
+    ok ? '未发现重名（已 IIFE 包裹的 export_phase2.js 其声明不处于全局顶层，属预期内）'
+       : `❌ 以下标识符在多个脚本的顶层（列0）重复声明，会导致后加载文件整份不执行：\n          ${dups.map(([n, fs]) => `${n} → ${fs.join(' / ')}`).join('\n          ')}`);
+  return ok;
+}
+
 // ———————————————— 主流程 ————————————————
 
 (async () => {
@@ -403,6 +436,7 @@ function v9() {
   if (want('V7')) { try { v7(); } catch (e) { check('V7', '依赖文件齐全', false, '检查异常：' + e.message); } }
   if (want('V8')) { try { v8(); } catch (e) { check('V8', '静态资源完整', false, '检查异常：' + e.message); } }
   if (want('V9')) { try { v9(); } catch (e) { check('V9', '前端地址一致', false, '检查异常：' + e.message); } }
+  if (want('V10')) { try { v10(); } catch (e) { check('V10', '跨脚本顶层声明无重名', false, '检查异常：' + e.message); } }
 
   // ———— 清理：若 V5 没跑或没删掉，兜底再删一次 ————
   if (createdId) {

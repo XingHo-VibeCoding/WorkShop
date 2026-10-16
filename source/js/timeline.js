@@ -168,6 +168,8 @@ function apiItemToLocal(a) {
     // 「只看 X 的」过滤恒为 undefined===owner（全部过滤掉）且卡片外框色不渲染。
     ownerMemberId: a.ownerMemberId != null ? Number(a.ownerMemberId) : null,
     borderColor: a.borderColor || '',
+    meetingNo: a.meetingNo || null,   // 【阶段二 P11】单条会议入会信息（方案①，覆盖成员默认）
+    meetingUrl: a.meetingUrl || null,
     updatedAtRaw: a.updatedAtRaw != null ? String(a.updatedAtRaw) : null,  // 【阶段二 P9】并发版本号（与后端逐字一致）
   };
 }
@@ -225,6 +227,8 @@ function localItemToPayload(d) {
     borderColor: (window.Auth && window.Auth.currentMember() && window.Auth.currentMember().borderColor) || '',
     // 【阶段二 P9】代他人放置：归属给谁（空=自己，由后端按令牌定）；编辑时带版本号做并发条件更新
     ownerMemberId: (d.ownerMemberId != null && d.ownerMemberId !== '') ? Number(d.ownerMemberId) : undefined,
+    meetingNo: d.meetingNo || undefined,   // 【阶段二 P11】单条覆盖个人默认
+    meetingUrl: d.meetingUrl || undefined,
     baseUpdatedAt: d.baseUpdatedAt || undefined,
   };
 }
@@ -270,6 +274,7 @@ function seedItems(monday) {
 }
 
 let items = [];
+let MEMBERS_CACHE = [];  // 【阶段二 P11】成员列表缓存（含 meetingNo/meetingUrl），供卡片解析归属成员的默认会议号
 // [Day 11] 已删除项 id 集合：种子数据每次切周会被 loadItems 重灌，靠此集合让删除跨周持久（仅内存态，刷新重置）
 const deletedIds = new Set();
 
@@ -333,7 +338,7 @@ function renderItemCard(item, opts = {}) {
     (showMark ? `<span class="item-mark" title="${esc(m.name)}">${esc(m.symbol)}</span>` : '') +
     `<span class="item-title">${esc(renderItemText(item))}</span>` +
     `<span class="item-time">${item.startTime}–${item.endTime}</span>` +
-    (warn ? `<span class="item-warn" title="${esc(warn.title)}">⚠</span>` : '');
+    (warn ? `<span class="item-warn" title="${esc(warn.title)}">⚠</span>` : '') + meetEntryHtml(item);
   el.addEventListener('click', onClick || (() => showDetail(item)));
   // 备注浮窗：桌面端 hover/聚焦即显示完整备注；移动端触摸无 hover，改为「点卡片→底部抽屉看备注」，故内部判 isMobile 屏蔽浮窗
   el.addEventListener('mouseenter', () => { if (!isMobile()) showNote(item, el); });
@@ -341,6 +346,29 @@ function renderItemCard(item, opts = {}) {
   el.addEventListener('focusin', () => { if (!isMobile()) showNote(item, el); });
   el.addEventListener('focusout', () => { if (!isMobile()) scheduleNoteHide(); });
   return el;
+}
+
+// 【阶段二 P11】腾讯会议入会入口：单条 meetingUrl 优先，否则归属成员的固定会议号（方案①）
+function resolveMeeting(item) {
+  if (item.meetingUrl) return { url: item.meetingUrl, no: item.meetingNo };
+  const me = window.Auth && typeof window.Auth.currentMember === 'function' ? window.Auth.currentMember() : null;
+  const ownerId = (item.ownerMemberId != null && item.ownerMemberId !== '') ? Number(item.ownerMemberId) : (me ? Number(me.id) : null);
+  if (ownerId == null) return null;
+  const m = MEMBERS_CACHE.find(x => Number(x.id) === ownerId);
+  if (m && m.meetingUrl) return { url: m.meetingUrl, no: m.meetingNo };
+  return null;
+}
+function meetEntryHtml(item) {
+  const mt = resolveMeeting(item);
+  if (!mt || !mt.url) return '';
+  const no = mt.no ? ` · ${esc(mt.no)}` : '';
+  return `<a class="item-meet" href="${esc(mt.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="加入腾讯会议（个人会议室，注意别撞会）">入会${no}</a>`;
+}
+function meetDetailHtml(item) {
+  const mt = resolveMeeting(item);
+  if (!mt || !mt.url) return '';
+  const no = mt.no ? esc(mt.no) : '（未填会议号）';
+  return `<p class="row detail-meeting"><b>入会</b><a href="${esc(mt.url)}" target="_blank" rel="noopener" class="meet-btn">加入腾讯会议</a> <span class="meet-no">${no}</span><br><span class="meet-note">个人会议室，注意别撞会</span></p>`;
 }
 
 // ============ [Day 14] 备注浮窗：hover/focus 即生效，尺寸随字数自动调节 ============
@@ -957,6 +985,7 @@ function showDetail(item) {
       <p class="row"><b>参与人</b>${esc(item.attendees)}</p>
       <p class="row"><b>场地</b>${esc(item.venue)}</p>
       <p class="row"><b>备注</b>${item.note ? esc(item.note) : '<span style="color:var(--ink-soft)">—</span>'}</p>
+      ${meetDetailHtml(item)}
       <div class="form-actions">
         <button class="btn-edit" id="btn-edit">编辑</button>
         <button class="btn-delete" id="btn-delete">删除此事项</button>
@@ -1022,6 +1051,11 @@ async function renderForm(existing) {
         <label>参与人<input name="attendees" value="${isEdit ? esc(existing.attendees) : ''}"></label>
         <label>场地<input name="venue" value="${isEdit ? esc(existing.venue) : ''}"></label>
         <label>备注<textarea name="note" rows="2">${isEdit ? esc(existing.note) : ''}</textarea></label>
+        <div id="f-meeting" class="cond-field">
+          <p class="set-hint">会议入会信息（可选）：留空则使用「设置 → 我的腾讯会议」里的个人默认。</p>
+          <label>会议号<input name="meetingNo" value="${isEdit ? esc(existing.meetingNo || '') : ''}" maxlength="60"></label>
+          <label>入会链接<input name="meetingUrl" type="url" value="${isEdit ? esc(existing.meetingUrl || '') : ''}" placeholder="https://meeting.tencent.com/dm/..."></label>
+        </div>
         <div class="form-actions">
           <button type="submit" class="btn-save primary">${isEdit ? '保存修改' : '创建'}</button>
           <button type="button" class="btn-cancel" id="btn-cancel">取消</button>
@@ -1039,6 +1073,9 @@ async function renderForm(existing) {
     const t = fTable.value;
     document.getElementById('f-owner').style.display = t === 'work' ? '' : 'none';
     fType.innerHTML = typeOptionsHTML(t, fType.value);
+    // 【阶段二 P11】会议类型才显示入会信息字段
+    const fm = document.getElementById('f-meeting');
+    if (fm) fm.style.display = fType.value === 'meeting' ? '' : 'none';
   };
   fTable.addEventListener('change', syncCond);
   syncCond();
@@ -1127,6 +1164,8 @@ async function saveItem(existing) {
     start,
     ownerKey: table === 'work' ? fd.get('ownerKey') : 'me',
     ownerMemberId: fd.get('ownerMemberId') || '',  // 【阶段二 P9】代他人放置的目标成员 id（空=自己）
+    meetingNo: (fd.get('meetingNo') || '').trim(),   // 【阶段二 P11】单条会议入会信息（方案①）
+    meetingUrl: (fd.get('meetingUrl') || '').trim(),
   };
 
   // ---- 越界①/②：前端先挡一道，后端还有 400/422 兜底（双保险，省一次往返）----
@@ -1473,6 +1512,8 @@ async function bootstrap() {
     const data = await loadItems(currentOffset);
     items = data;
     setState(data.length ? 'success' : 'empty');
+    // 【阶段二 P11】缓存成员列表（含 meetingNo/meetingUrl），供卡片解析归属成员的默认会议号
+    try { MEMBERS_CACHE = (window.Auth && typeof window.Auth.members === 'function') ? await window.Auth.members() : []; } catch (_) { MEMBERS_CACHE = []; }
     render();
     applyRoleUI();   // 【阶段二 P9】只读身份时隐藏新建按钮
     if (!data.length) showDetail(null);
@@ -1506,7 +1547,60 @@ function closeSettings() { document.getElementById('settings-modal').hidden = tr
 function renderSettings() {
   renderOwnerList();
   renderColorList();
+  renderMeetingSettings();  // 【阶段二 P11】加载并接线「我的腾讯会议」
   document.getElementById('set-default-view').value = defaultStartMode;
+}
+
+// 【阶段二 P11】设置弹窗「我的腾讯会议」：读取当前成员固定会议号/链接，保存到 /api/members（方案①）
+async function renderMeetingSettings() {
+  const noEl = document.getElementById('me-meeting-no');
+  const urlEl = document.getElementById('me-meeting-url');
+  const errEl = document.getElementById('me-meeting-err');
+  const saveBtn = document.getElementById('btn-save-meeting');
+  if (!noEl || !urlEl || !saveBtn) return;
+  // 读取当前成员已有的会议信息（凭令牌，只能读自己）
+  try {
+    const r = await fetch(`${API_BASE}/api/members`, { headers: (window.Auth ? window.Auth.withHeaders({}) : {}) });
+    const j = await r.json().catch(() => null);
+    if (j && j.ok && j.data) {
+      noEl.value = j.data.meetingNo || '';
+      urlEl.value = j.data.meetingUrl || '';
+    }
+  } catch (_) { /* 读取失败不阻塞，用户可手动填 */ }
+  if (errEl) errEl.hidden = true;
+  // 前端域名兜底校验（与后端白名单同一份）
+  const WHITELIST = ['meeting.tencent.com', 'voovmeeting.com', 'tencentmeeting.cn'];
+  const validate = () => {
+    const v = urlEl.value.trim();
+    if (!v) { if (errEl) errEl.hidden = true; return true; }
+    let host;
+    try { host = new URL(v).hostname.toLowerCase(); } catch (_) { if (errEl) { errEl.textContent = '入会链接格式不正确，请输入完整链接'; errEl.hidden = false; } return false; }
+    const ok = WHITELIST.some(d => host === d || host.endsWith('.' + d));
+    if (!ok) { if (errEl) { errEl.textContent = '入会链接必须是腾讯会议链接'; errEl.hidden = false; } return false; }
+    if (errEl) errEl.hidden = true; return true;
+  };
+  urlEl.oninput = validate;
+  saveBtn.onclick = async () => {
+    if (!validate()) return;
+    const body = { meetingNo: noEl.value.trim(), meetingUrl: urlEl.value.trim() };
+    try {
+      const res = await fetch(`${API_BASE}/api/members`, {
+        method: 'PATCH',
+        headers: (window.Auth ? window.Auth.withHeaders({ 'Content-Type': 'application/json' }) : { 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body),
+      });
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j || !j.ok) {
+        showToast('保存失败：' + ((j && j.error && j.error.message) || ('HTTP ' + res.status)));
+        return;
+      }
+      // 同步到本地缓存的当前成员，避免详情卡/卡片滞后
+      const me = window.Auth && typeof window.Auth.currentMember === 'function' ? window.Auth.currentMember() : null;
+      if (me) { me.meetingNo = j.data.meetingNo || null; me.meetingUrl = j.data.meetingUrl || null; }
+      showToast('已保存我的会议信息');
+      closeSettings();
+    } catch (e) { showToast('保存失败：' + e.message); }
+  };
 }
 
 // 部门/标记变更后：实时刷新时间线 + 当前详情

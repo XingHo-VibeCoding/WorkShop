@@ -1,0 +1,7 @@
+{
+  "name": "workshop-profile-phase2",
+  "version": "1.0.0",
+  "description": "WorkShop 阶段二 P11 成员个人资料云函数（GET/POST/PATCH /api/members，方案①固定会议号）· 零依赖直打 PostgREST",
+  "main": "index.js",
+  "dependencies": {}
+}

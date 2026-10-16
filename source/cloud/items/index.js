@@ -218,6 +218,15 @@ async function createItem(event) {
     source: 'manual',
     status: 'scheduled',
   };
+  // 【阶段二 P11】会议入会信息（单条覆盖，方案①）：可选，写入前校验链接域名
+  if (body.meetingUrl != null && String(body.meetingUrl).trim() !== '') {
+    const ve = validateMeetingUrl(body.meetingUrl);
+    if (ve) return { ok: false, data: null, error: ve };
+    row.meeting_url = String(body.meetingUrl).trim();
+  }
+  if (body.meetingNo != null && String(body.meetingNo).trim() !== '') {
+    row.meeting_no = String(body.meetingNo).trim();
+  }
   // 【阶段二 P9】权限判定 + 归属写入。
   // owner_member_id / created_by 必须由后端从令牌解（不可信前端，防伪造归属）。
   const _lm = resolveLogin(event);
@@ -309,8 +318,27 @@ const PATCHABLE = {
   venue: 'venue',
   note: 'note',
   status: 'status',
+  meetingNo: 'meeting_no',
+  meetingUrl: 'meeting_url',
 };
 const ITEM_STATUS = ['scheduled', 'done', 'cancelled'];
+
+// —— 【阶段二 P11】腾讯会议入会链接域名白名单（方案①，防钓鱼）——
+// 写入 meeting_url 时必须落在腾讯会议官方域名族；空串/未传允许（表示清空或不带链接）。
+const MEETING_URL_WHITELIST = ['meeting.tencent.com', 'voovmeeting.com', 'tencentmeeting.cn'];
+function validateMeetingUrl(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (s === '') return null; // 允许清空
+  let host;
+  try {
+    host = new URL(s).hostname.toLowerCase();
+  } catch (e) {
+    return { code: 400, message: '入会链接格式不正确，请输入完整链接' };
+  }
+  const ok = MEETING_URL_WHITELIST.some((d) => host === d || host.endsWith('.' + d));
+  if (!ok) return { code: 400, message: '入会链接必须是腾讯会议链接' };
+  return null;
+}
 
 async function patchItem(event) {
   const t0 = Date.now();
@@ -325,7 +353,7 @@ async function patchItem(event) {
   // 2) 挑出本次真正要改的字段（至少有一个，否则就是空请求）
   const keys = Object.keys(PATCHABLE).filter((k) => body[k] !== undefined && body[k] !== null);
   if (!keys.length) {
-    return { ok: false, data: null, error: { code: 400, message: '没有要更新的字段：请至少传一个可改字段（title/table/type/startTime/endTime/ownerKey/attendees/venue/note/status）' } };
+    return { ok: false, data: null, error: { code: 400, message: '没有要更新的字段：请至少传一个可改字段（title/table/type/startTime/endTime/ownerKey/attendees/venue/note/status/meetingNo/meetingUrl）' } };
   }
 
   // 3) 取值校验（只校验本次传了的字段；没传的保持原样）
@@ -357,6 +385,19 @@ async function patchItem(event) {
       const norm = normalizeTime(v);
       if (!norm) return { ok: false, data: null, error: { code: 400, message: `${k === 'startTime' ? '开始' : '结束'}时间格式应为 YYYY-MM-DD HH:mm` } };
       v = norm;
+    }
+    if (k === 'meetingUrl') {
+      const s = String(v).trim();
+      if (s === '') { v = null; } // 允许清空入会链接
+      else {
+        const ve = validateMeetingUrl(s);
+        if (ve) return { ok: false, data: null, error: ve };
+        v = s;
+      }
+    }
+    if (k === 'meetingNo') {
+      const s = String(v).trim();
+      v = s === '' ? null : s; // 允许清空会议号
     }
     patch[PATCHABLE[k]] = v;
   }

@@ -127,6 +127,23 @@
 
           <hr>
 
+          <section class="set-section" id="meeting-settings">
+            <h4>我的腾讯会议（方案① · 固定个人会议号）</h4>
+            <p class="set-hint">填一次你的固定会议号与入会链接，新建/编辑会议日程会自动带入。所有人共用同一会议室，可能撞会。</p>
+            <label class="set-row">会议号
+              <input id="me-meeting-no" type="text" maxlength="60" placeholder="如 559 104 286" aria-label="个人会议号">
+            </label>
+            <label class="set-row">入会链接
+              <input id="me-meeting-url" type="url" placeholder="https://meeting.tencent.com/dm/..." aria-label="个人入会链接">
+            </label>
+            <p class="set-err" id="me-meeting-err" hidden></p>
+            <div class="set-actions">
+              <button class="primary" id="btn-save-meeting">保存我的会议信息</button>
+            </div>
+          </section>
+
+          <hr>
+
           <section class="set-section">
             <h4>3 · 通用</h4>
             <label class="set-row">默认启动视图

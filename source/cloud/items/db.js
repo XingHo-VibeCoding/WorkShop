@@ -371,7 +371,7 @@ async function findMemberByName(displayName) {
 async function listMembers() {
   const token = await getBearer();
   const p = new URLSearchParams();
-  p.set('select', 'id,display_name,role,border_color');
+  p.set('select', 'id,display_name,role,border_color,meeting_no,meeting_url');
   p.set('auth_kind', 'eq.passcode');
   p.set('order', 'id.asc');
   const res = await fetch(`${GATEWAY}/v1/rdb/rest/members_phase2?${p.toString()}`, {
@@ -397,6 +397,8 @@ async function listMembers() {
     displayName: r.display_name || '',
     role: r.role || 'member',
     borderColor: r.border_color || null,
+    meetingNo: r.meeting_no || null,
+    meetingUrl: r.meeting_url || null,
   }));
 }
 
