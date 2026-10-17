@@ -124,8 +124,12 @@ function isReadOnly() {
   return !!(m && m.role === 'readonly');
 }
 function applyRoleUI() {
+  const ro = isReadOnly();
   const btnNew = document.getElementById('btn-new');
-  if (btnNew) btnNew.hidden = isReadOnly();
+  if (btnNew) btnNew.hidden = ro;
+  // 【阶段二 权限收敛 seam B】只读身份：禁用「保存我的会议信息」（后端 updateProfile 同步 403 兜底，见 profile_phase2）
+  const btnSaveMeeting = document.getElementById('btn-save-meeting');
+  if (btnSaveMeeting) btnSaveMeeting.disabled = ro;
 }
 
 // ---- [Day 20] 真实 API 接线：loadItems 从 mock 切换为调用公网接口 ----
@@ -1567,7 +1571,10 @@ async function renderMeetingSettings() {
       urlEl.value = j.data.meetingUrl || '';
     }
   } catch (_) { /* 读取失败不阻塞，用户可手动填 */ }
-  if (errEl) errEl.hidden = true;
+  if (errEl) {
+    if (isReadOnly()) { errEl.textContent = '当前为只读身份，无法修改会议信息'; errEl.hidden = false; }
+    else { errEl.hidden = true; }
+  }
   // 前端域名兜底校验（与后端白名单同一份）
   const WHITELIST = ['meeting.tencent.com', 'voovmeeting.com', 'tencentmeeting.cn'];
   const validate = () => {

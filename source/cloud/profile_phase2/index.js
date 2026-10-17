@@ -117,6 +117,15 @@ function resolveLogin(event) {
   } catch (_) { return null; }
 }
 
+// 【阶段二 诊断加固 2026-10-16】云函数环境变量 WORKSHOP_AUTH_SECRET 未注入时，
+// verifyToken 必抛「未配置身份密钥」，但 resolveLogin 会把所有异常静默吞成 null → 表现为
+// "明明登录了却说未登录"（401）。此处提前自检，明确返回 503 + 中文，避免误导成登录问题。
+function ensureConfigured() {
+  if (identity.isConfigured && identity.isConfigured()) return null;
+  console.error('[profile] WORKSHOP_AUTH_SECRET 未配置 → 无法校验身份令牌');
+  return { ok: false, data: null, error: { code: 503, message: '服务未配置身份密钥，请联系管理员（云函数环境变量 WORKSHOP_AUTH_SECRET 缺失）' } };
+}
+
 const MEMBER_SELECT = 'id,display_name,role,border_color,meeting_no,meeting_url';
 function toMember(r) {
   if (!r) return null;
@@ -132,6 +141,7 @@ function toMember(r) {
 
 // —— GET /api/members：读取自己的资料 ——
 async function getProfile(event) {
+  const cfg = ensureConfigured(); if (cfg) return cfg;
   const me = resolveLogin(event);
   if (!me || !me.mid) {
     return { ok: false, data: null, error: { code: 401, message: '请先登录后再查看个人会议信息' } };
@@ -158,9 +168,14 @@ async function getProfile(event) {
 
 // —— POST/PATCH /api/members：更新自己的会议号/链接 ——
 async function updateProfile(event) {
+  const cfg = ensureConfigured(); if (cfg) return cfg;
   const me = resolveLogin(event);
   if (!me || !me.mid) {
     return { ok: false, data: null, error: { code: 401, message: '请先登录后再保存个人会议信息' } };
+  }
+  // 【阶段二 权限收敛 seam B】只读身份一律拒绝修改（前端 applyRoleUI 已禁用保存按钮，此处为最终审防线）
+  if (me.role === 'readonly') {
+    return { ok: false, data: null, error: { code: 403, message: '当前身份为只读，无法修改个人会议信息' } };
   }
   const body = getBody(event);
   const patch = {};
