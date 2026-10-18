@@ -118,6 +118,8 @@ const FIELD_CN = {
 const TABLE_KINDS = ['work', 'daily'];
 const ITEM_TYPES = ['meeting', 'trip', 'travel', 'course', 'class', 'sport', 'life', 'other', 'pending'];
 const OWNER_KEYS = ['self', 'depta', 'deptb', 'deptc', 'deptd', 'me'];
+// 【阶段二 管理员 UI】可指派的角色白名单（与 db/schema_phase2.sql 的 chk_members_role 一致）
+const MEMBER_ROLES = ['member', 'readonly', 'admin'];
 
 // 时间规整：YYYY-MM-DD HH:mm(:ss) → YYYY-MM-DD HH:mm:ss（补秒，便于与库内值精确比对去重）
 // 【Day 24】解析放宽（契约同步）：前端已改成拨轮选时间、不再手打，但脚本 / 将来的导入接口仍会送各种写法，
@@ -573,6 +575,72 @@ async function authVerify(event) {
   };
 }
 
+// —— 【阶段二 在线人数】心跳：有令牌则刷新自己的 last_seen_at，并返回当前在线人数（2026-10-18）——
+// 设计口径（用户 2026-10-18 拍板）：
+//   ① 匿名（无令牌/坏令牌）不记心跳 → 只统计登录成员；
+//   ② 匿名仍可看到在线人数（公开信息，不需要登录）；
+//   ③ 心跳刷新失败不阻断：记日志、照常返回在线人数，前端下一轮再试；
+//   ④ 前端 30s 一次，2 分钟窗口判在线 → 关页面/断网最多滞留 2 分钟。
+async function heartbeat(event) {
+  const actor = resolveLogin(event);
+  if (actor) {
+    try {
+      await db.touchMember(actor.mid);
+    } catch (e) {
+      console.error('[heartbeat] last_seen_at 刷新失败（不阻断）：', e && e.message);
+    }
+  }
+  const online = await db.countOnline(2);
+  return { ok: true, data: { online }, error: null };
+}
+
+// —— 【阶段二 管理员 UI】管理员改他人角色（seam C 落地，2026-10-18）——
+// ★ 铁律（PERMISSIONS_phase2 §四）：前端隐藏/禁用按钮只是体验层，这里是最终审防线。
+//   ① 无令牌/坏令牌 → 401（不拿"没权限"冒充登录问题）；
+//   ② 令牌有效但 role≠admin → 403；
+//   ③ 不允许改自己（防误操作把自己降级，丢了管理入口）；
+//   ④ role 必须落在白名单；目标成员必须存在；
+//   ⑤ 改完写 audit_phase2（action=set_role，detail 含 from → to；留痕失败不阻断）。
+// ⚠️ 已知限制：令牌 payload 含 role（7 天有效）→ 被改者需【重新登录】新角色才生效，UI 层会提示。
+async function setRole(event) {
+  const body = getBody(event);
+  const actor = resolveLogin(event);
+  if (!actor) {
+    return { ok: false, data: null, error: { code: 401, message: '请先登录后再修改成员角色' } };
+  }
+  if (String(actor.role || '') !== 'admin') {
+    return { ok: false, data: null, error: { code: 403, message: '只有管理员可以修改成员角色' } };
+  }
+  const memberId = Number(body.memberId);
+  const role = String(body.role || '').trim();
+  if (!Number.isInteger(memberId) || memberId <= 0) {
+    return { ok: false, data: null, error: { code: 400, message: '缺少必填字段：成员 id' } };
+  }
+  if (!MEMBER_ROLES.includes(role)) {
+    return { ok: false, data: null, error: { code: 400, message: `角色取值无效：${role}（应为 ${MEMBER_ROLES.join(' / ')}）` } };
+  }
+  if (memberId === Number(actor.mid)) {
+    return { ok: false, data: null, error: { code: 403, message: '不能修改自己的角色（防止误操作丢失管理权限）' } };
+  }
+  const target = await db.findMemberById(memberId);
+  if (!target) {
+    return { ok: false, data: null, error: { code: 404, message: '目标成员不存在' } };
+  }
+  const result = await db.updateMemberRole(memberId, role);
+  if (result.error) return { ok: false, data: null, error: result.error };
+  if (result.notFound) {
+    return { ok: false, data: null, error: { code: 404, message: '目标成员不存在' } };
+  }
+  await db.insertAudit({
+    actorId: actor.mid,
+    action: 'set_role',
+    targetId: result.member.id,
+    detail: `角色变更：${target.role || 'member'} → ${result.member.role}`,
+  });
+  console.log('[POST /api/setRole] 管理员', actor.mid, '将成员', memberId, '角色改为', role);
+  return { ok: true, data: result.member, error: null };
+}
+
 // 真正的业务分发（原 exports.main 的本体）。外面再包一层，只为记一行请求日志。
 async function handle(event = {}) {
   const method = getMethod(event);
@@ -632,6 +700,26 @@ async function handle(event = {}) {
       return http(event, { ok: true, data: list, error: null });
     } catch (err) {
       logError('GET /api/members', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
+    }
+  }
+
+  // 【阶段二 在线人数】心跳：GET/POST 都收（30s 一次的保活信号，少一种失败模式）
+  if (action === 'heartbeat' && (method === 'GET' || method === 'POST')) {
+    try { return http(event, await heartbeat(event)); }
+    catch (err) {
+      logError('HEARTBEAT', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
+    }
+  }
+
+  // 【阶段二 管理员 UI】改他人角色：仅 POST；仅 admin（校验在 setRole 内，见函数头铁律）
+  if (action === 'setrole' && method === 'POST') {
+    try { return http(event, await setRole(event)); }
+    catch (err) {
+      logError('POST /api/setRole', err);
       const e = toUserError(err);
       return http(event, { ok: false, data: null, error: e }, e.code);
     }

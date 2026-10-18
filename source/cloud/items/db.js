@@ -465,6 +465,109 @@ async function insertAudit({ itemId, actorId, action, targetId, detail }) {
   }
 }
 
+// —— 【阶段二 在线人数】心跳：刷新自己的 last_seen_at（在线判定用，2026-10-18）——
+// 前端每 30s 上报一次；2 分钟窗口内有心跳视为在线。失败抛错由调用方兜
+// （心跳是保活信号，失败不该让前端误判成登录失效）。
+// ★ PATCH 必须带 `id=eq.<具体值>`：PostgREST 的 PATCH 不带过滤条件会【整表更新】（Day 22 同款教训）。
+async function touchMember(mid) {
+  const n = Number(mid);
+  if (!Number.isInteger(n) || n <= 0) throw new Error('touchMember: mid 无效');
+  const token = await getBearer();
+  const q = new URLSearchParams();
+  q.set('id', `eq.${n}`);
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/members_phase2?${q.toString()}`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Accept-Profile': SCHEMA,
+      'Content-Profile': SCHEMA,
+      'Prefer': 'return=minimal',
+    },
+    // 时钟用函数容器本地时间（与 countOnline 同一时钟，自洽；窗口 2 分钟远大于时钟偏差）
+    body: JSON.stringify({ last_seen_at: new Date().toISOString() }),
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`心跳更新失败 HTTP ${res.status}: ${t.slice(0, 200)}`);
+  }
+}
+
+// —— 【阶段二 在线人数】统计窗口内心跳过的成员数（2026-10-18）——
+// 只有登录成员会记心跳（匿名无令牌不记）→ 统计口径 = 登录成员中的在线数。
+// minutes: 判定窗口（分钟），默认 2。成员量小（个位数），直接数行，不引入 count 聚合头。
+async function countOnline(minutes = 2) {
+  const win = Math.max(1, Number(minutes) || 2);
+  const since = new Date(Date.now() - win * 60 * 1000).toISOString();
+  const token = await getBearer();
+  const p = new URLSearchParams();
+  p.set('select', 'id');
+  p.set('last_seen_at', `gte.${since}`);
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/members_phase2?${p.toString()}`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Accept': 'application/json',
+      'Accept-Profile': SCHEMA,
+      'Content-Profile': SCHEMA,
+    },
+  });
+  const text = await res.text();
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (e) {
+    throw new Error(`在线人数查询返回非 JSON（HTTP ${res.status}）：${text.slice(0, 200)}`);
+  }
+  if (!res.ok) {
+    const msg = (json && (json.message || json.error || json.error_description || json.hint)) || `HTTP ${res.status}`;
+    throw new Error(`在线人数查询失败：${msg}`);
+  }
+  const rows = Array.isArray(json) ? json : (json && json.data) || [];
+  return rows.length;
+}
+
+// —— 【阶段二 管理员 UI】改他人角色（2026-10-18，seam C 落地）——
+// ★ 权限校验（仅 admin、禁改自己）在 index.js 的 setRole 内，本函数只做数据写入。
+// 返回：{ member: {id, displayName, role} } 成功 / { notFound: true } id 不存在 / { error } 失败
+async function updateMemberRole(mid, role) {
+  const n = Number(mid);
+  if (!Number.isInteger(n) || n <= 0) return { notFound: true };
+  const token = await getBearer();
+  const q = new URLSearchParams();
+  q.set('id', `eq.${n}`);   // ★ 同 Day 22 教训：不带条件 = 整表改角色，灾难
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/members_phase2?${q.toString()}`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Accept-Profile': SCHEMA,
+      'Content-Profile': SCHEMA,
+      'Prefer': 'return=representation',
+    },
+    body: JSON.stringify({ role: String(role) }),
+  });
+  const text = await res.text();
+  let json;
+  try { json = JSON.parse(text); }
+  catch (e) {
+    return { error: { code: 500, message: `改角色返回非 JSON（HTTP ${res.status}）：${text.slice(0, 200)}` } };
+  }
+  if (!res.ok) {
+    const msg = (json && (json.message || json.error || json.error_description || json.hint)) || `HTTP ${res.status}`;
+    return { error: { code: res.status, message: `更新成员角色失败：${msg}` } };
+  }
+  const rows = Array.isArray(json) ? json : (json && json.data) || [];
+  if (!rows.length) return { notFound: true };
+  return {
+    member: {
+      id: rows[0].id,
+      displayName: rows[0].display_name || '',
+      role: rows[0].role || 'member',
+    },
+  };
+}
+
 module.exports = {
   queryItems,
   findDuplicate,
@@ -478,4 +581,8 @@ module.exports = {
   listMembers,
   findMemberById,
   insertAudit,
+  // 【阶段二 管理员 UI + 在线人数 2026-10-18】
+  touchMember,
+  countOnline,
+  updateMemberRole,
 };

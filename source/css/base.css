@@ -463,6 +463,18 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .set-actions button.primary:hover { background: #1746b8; color: #fff; }
 .set-actions button:disabled { opacity: .45; cursor: not-allowed; }
 
+/* 设置弹窗错误提示（P11 会议信息 / 管理员 UI 共用） */
+.set-err { font-size: 12px; color: var(--warn); line-height: 1.5; margin: 0 0 10px; }
+
+/* [阶段二 管理员 UI 2026-10-18] 成员管理行 */
+.member-admin-list { margin: 0 0 10px; }
+.member-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.member-row .m-name { flex: 1; font-size: 13px; color: var(--ink); }
+.member-row .m-self { font-size: 12px; color: var(--ink-soft); }
+.member-row .m-role { padding: 5px 7px; border: 1px solid var(--line); border-radius: 5px; font-size: 13px; font-family: inherit; color: var(--ink); background: #fff; cursor: pointer; }
+.member-row .m-role:hover:not(:disabled) { border-color: var(--accent); }
+.member-row .m-role:disabled { opacity: .45; cursor: not-allowed; }
+
 /* 类型颜色行 */
 .color-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); }
 .color-row .c-label { width: 52px; font-size: 13px; }

@@ -123,6 +123,12 @@ function isReadOnly() {
   const m = window.Auth && window.Auth.currentMember();
   return !!(m && m.role === 'readonly');
 }
+// 【阶段二 管理员 UI 2026-10-18】管理员身份：控制「成员管理」区块显隐。
+// ⚠️ 前端显隐只是体验层，越权请求由后端 setRole（仅 admin）403 兜底（PERMISSIONS_phase2 §四）。
+function isAdmin() {
+  const m = window.Auth && window.Auth.currentMember();
+  return !!(m && m.role === 'admin');
+}
 function applyRoleUI() {
   const ro = isReadOnly();
   const btnNew = document.getElementById('btn-new');
@@ -130,6 +136,9 @@ function applyRoleUI() {
   // 【阶段二 权限收敛 seam B】只读身份：禁用「保存我的会议信息」（后端 updateProfile 同步 403 兜底，见 profile_phase2）
   const btnSaveMeeting = document.getElementById('btn-save-meeting');
   if (btnSaveMeeting) btnSaveMeeting.disabled = ro;
+  // 【阶段二 管理员 UI】仅 admin 显示「成员管理」区块
+  const memberAdmin = document.getElementById('member-admin');
+  if (memberAdmin) memberAdmin.hidden = !isAdmin();
 }
 
 // ---- [Day 20] 真实 API 接线：loadItems 从 mock 切换为调用公网接口 ----
@@ -1531,6 +1540,8 @@ currentMode = defaultStartMode;
 activateModeTab(currentMode);
 initSheetDrag();   // [Day 25] 绑定移动端副栏拖动手柄（桌面端内部 isMobile 守卫，空操作）
 bootstrap();
+// 【阶段二 在线人数 2026-10-18】启动心跳（匿名也跑：只上报可见性，不记心跳）
+startHeartbeat();
 
 // =================== [Day 9] 设置系统（实装） ===================
 // 白字对比校验：WCAG AA 要求白字 on 背景 ≥4.5:1，防止把类型色调回不达标浅色
@@ -1552,12 +1563,12 @@ function renderSettings() {
   renderOwnerList();
   renderColorList();
   renderMeetingSettings();  // 【阶段二 P11】加载并接线「我的腾讯会议」
+  if (isAdmin()) renderMemberAdmin();  // 【阶段二 管理员 UI】仅 admin 加载成员管理列表
   document.getElementById('set-default-view').value = defaultStartMode;
 }
 
 // 【阶段二 P11】设置弹窗「我的腾讯会议」：读取当前成员固定会议号/链接，保存到 /api/members（方案①）
-async function renderMeetingSettings() {
-  const noEl = document.getElementById('me-meeting-no');
+async function renderMeetingSettings() {  const noEl = document.getElementById('me-meeting-no');
   const urlEl = document.getElementById('me-meeting-url');
   const errEl = document.getElementById('me-meeting-err');
   const saveBtn = document.getElementById('btn-save-meeting');
@@ -1608,6 +1619,104 @@ async function renderMeetingSettings() {
       closeSettings();
     } catch (e) { showToast('保存失败：' + e.message); }
   };
+}
+
+// 【阶段二 管理员 UI 2026-10-18】设置弹窗「成员管理」（仅 admin 可见，applyRoleUI 控显隐）：
+// 拉成员列表 → 每行一个角色下拉（自己那一行禁用）→「保存角色更改」把变更逐个提交 setrole。
+// 铁律：前端禁用/双保险只是体验层，越权由后端 setRole（仅 admin）403 兜底。
+async function renderMemberAdmin() {
+  const listEl = document.getElementById('member-admin-list');
+  const errEl = document.getElementById('member-admin-err');
+  const saveBtn = document.getElementById('btn-save-roles');
+  if (!listEl || !saveBtn) return;
+  const me = (window.Auth && typeof window.Auth.currentMember === 'function') ? window.Auth.currentMember() : null;
+  const members = (window.Auth && typeof window.Auth.members === 'function') ? await window.Auth.members() : [];
+  if (!members.length) {
+    listEl.innerHTML = '<p class="set-hint">未能加载成员列表，请稍后重试。</p>';
+    return;
+  }
+  const ROLE_CN = { member: '普通成员', readonly: '只读成员', admin: '管理员' };
+  listEl.innerHTML = '';
+  members.forEach((m) => {
+    const row = document.createElement('div');
+    row.className = 'member-row';
+    const isSelf = !!(me && Number(me.id) === Number(m.id));
+    row.innerHTML = `
+      <span class="m-name">${esc(m.displayName || ('成员#' + m.id))}${isSelf ? ' <span class="m-self">（你）</span>' : ''}</span>
+      <select class="m-role" data-id="${m.id}" aria-label="${esc(m.displayName || '成员')}的角色"${isSelf ? ' disabled' : ''}>
+        <option value="member"${m.role === 'member' ? ' selected' : ''}>${ROLE_CN.member}</option>
+        <option value="readonly"${m.role === 'readonly' ? ' selected' : ''}>${ROLE_CN.readonly}</option>
+        <option value="admin"${m.role === 'admin' ? ' selected' : ''}>${ROLE_CN.admin}</option>
+      </select>`;
+    listEl.appendChild(row);
+  });
+  if (errEl) errEl.hidden = true;
+  saveBtn.onclick = async () => {
+    // 收集与初始列表不同的项（一次只提交变更，不整表重写）
+    const changes = [];
+    listEl.querySelectorAll('.m-role').forEach((sel) => {
+      const id = Number(sel.dataset.id);
+      const origin = members.find((x) => Number(x.id) === id);
+      if (origin && origin.role !== sel.value) changes.push({ id, role: sel.value });
+    });
+    if (!changes.length) { showToast('没有需要保存的更改'); return; }
+    // 双保险：禁改自己（后端 setRole 同样 403，这里先挡一道并把原因说清）
+    if (me && changes.some((c) => c.id === Number(me.id))) {
+      if (errEl) { errEl.textContent = '不能修改自己的角色（防止误操作丢失管理权限）'; errEl.hidden = false; }
+      return;
+    }
+    saveBtn.disabled = true;
+    saveBtn.textContent = '保存中…';
+    try {
+      for (const c of changes) {
+        const res = await fetch(`${API_BASE}/api/items?_action=setrole`, {
+          method: 'POST',
+          headers: (window.Auth ? window.Auth.withHeaders({ 'Content-Type': 'application/json' }) : { 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ memberId: c.id, role: c.role }),
+        });
+        const j = await res.json().catch(() => null);
+        if (!res.ok || !j || !j.ok) {
+          const msg = (j && j.error && j.error.message) || ('HTTP ' + res.status);
+          if (res.status === 401) {
+            if (errEl) { errEl.textContent = '登录已失效，请重新登录后再试'; errEl.hidden = false; }
+          } else {
+            if (errEl) { errEl.textContent = '保存失败：' + msg; errEl.hidden = false; }
+          }
+          return;
+        }
+      }
+      if (errEl) errEl.hidden = true;
+      showToast(`已保存 ${changes.length} 项角色更改（相关成员重新登录后生效）`);
+      renderMemberAdmin();   // 重拉列表，回到与库一致的状态
+    } catch (e) {
+      if (errEl) { errEl.textContent = '保存失败：' + e.message; errEl.hidden = false; }
+    } finally {
+      saveBtn.disabled = false;
+      saveBtn.textContent = '保存角色更改';
+    }
+  };
+}
+
+// 【阶段二 在线人数 2026-10-18】心跳：每 30s 轻量上报一次，底栏显示「在线：N」。
+// 口径（用户拍板）：30s 上报 / 2 分钟窗口判在线 / 匿名不记心跳但可见在线数。
+// 失败静默（保活失败不打扰用户），保留上次显示，30s 后自然重试。
+async function heartbeatTick() {
+  try {
+    const res = await fetch(`${API_BASE}/api/items?_action=heartbeat`, {
+      method: 'POST',
+      headers: (window.Auth ? window.Auth.withHeaders({ 'Content-Type': 'application/json' }) : { 'Content-Type': 'application/json' }),
+      body: '{}',
+    });
+    const j = await res.json().catch(() => null);
+    if (res.ok && j && j.ok && j.data && typeof j.data.online === 'number') {
+      const el = document.getElementById('stat-online');
+      if (el) el.textContent = '在线：' + j.data.online;
+    }
+  } catch (_) { /* 静默：保留上次显示，下一轮再试 */ }
+}
+function startHeartbeat() {
+  heartbeatTick();                 // 立即来一次，不必等 30s
+  setInterval(heartbeatTick, 30000);
 }
 
 // 部门/标记变更后：实时刷新时间线 + 当前详情

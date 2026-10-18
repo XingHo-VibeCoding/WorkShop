@@ -84,6 +84,11 @@ CREATE TABLE IF NOT EXISTS members_phase2 (
 CREATE UNIQUE INDEX IF NOT EXISTS ux_members_identity ON members_phase2(identity_key);
 CREATE INDEX IF NOT EXISTS idx_members_role ON members_phase2(role);
 
+-- 【2026-10-18 在线人数】心跳时间戳：前端每 30s 上报一次，2 分钟窗口内有心跳 = 在线。
+-- 只统计登录成员（匿名无令牌不记心跳）。TIMESTAMPTZ 带时区，与容器/数据库时钟解耦。
+ALTER TABLE members_phase2 ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_members_online ON members_phase2(last_seen_at);
+
 /* ============================================================
  * 三、audit_phase2（操作留痕表）
  * ------------------------------------------------------------
@@ -106,6 +111,13 @@ CREATE TABLE IF NOT EXISTS audit_phase2 (
 CREATE INDEX IF NOT EXISTS idx_audit_item  ON audit_phase2(item_id);
 CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_phase2(actor_id);
 CREATE INDEX IF NOT EXISTS idx_audit_at    ON audit_phase2(created_at);
+
+-- 【2026-10-18 管理员 UI】动作白名单扩展：set_role（管理员改角色）。
+-- ⚠️ 必须 DROP 后 ADD：audit_phase2 建表时的 CHECK 白名单不含新动作，
+--    直接 INSERT set_role 会被约束拒绝（留痕静默丢失）。此处保持幂等可重跑。
+ALTER TABLE audit_phase2 DROP CONSTRAINT IF EXISTS chk_audit_action;
+ALTER TABLE audit_phase2 ADD CONSTRAINT chk_audit_action
+  CHECK (action IN ('create', 'update', 'delete', 'place_for', 'set_role'));
 
 /* ============================================================
  * 四、updated_at 自动维护（沿用 db/schema.sql 的既有触发器函数）
@@ -133,12 +145,13 @@ COMMENT ON COLUMN members_phase2.id            IS '主键，SERIAL 自增；item
 COMMENT ON COLUMN members_phase2.display_name  IS '显示名，如「张三」';
 COMMENT ON COLUMN members_phase2.identity_key  IS '身份键：passcode=口令 scrypt 哈希 hex（128 字符，实测长度，勿改小）/ wechat=uid。唯一索引防重复身份；NULL=尚未设置凭据（NULL 不受唯一约束，允许多个未设凭据成员并存）';
 COMMENT ON COLUMN members_phase2.auth_kind     IS '认证方式 passcode 口令 / wechat 微信(预留) / anon 匿名(预留)';
-COMMENT ON COLUMN members_phase2.role          IS '角色 member 可编辑 / readonly 只读 / admin 管理员(本期不用，仅留字段)';
+COMMENT ON COLUMN members_phase2.role          IS '角色 member 可编辑 / readonly 只读 / admin 管理员（2026-10-18 起已实配：库中有 admin 账号，seam C 管理 UI 落地）';
 COMMENT ON COLUMN members_phase2.border_color  IS '协作外框色 hex，如 #2F6FED；★填充色仍由日程类型决定，本列只管外框（颜色铁律）';
 COMMENT ON COLUMN members_phase2.meeting_no    IS '该成员的个人腾讯会议号（方案① 固定个人会议号，P11 填）';
 COMMENT ON COLUMN members_phase2.meeting_url   IS '该成员的个人入会链接（P11 填）；写入时校验腾讯会议域名白名单';
 COMMENT ON COLUMN members_phase2.salt          IS '口令哈希盐，16 字节 → hex 32 字符；仅 passcode 使用';
 COMMENT ON COLUMN members_phase2.note          IS '备注，便于人工辨认（如「张三 / 综合部」）';
+COMMENT ON COLUMN members_phase2.last_seen_at  IS '【2026-10-18 在线人数】最近一次心跳时间；前端 30s 上报，2 分钟窗口内有心跳视为在线。匿名不记（只统计登录成员）';
 COMMENT ON COLUMN members_phase2.external_id   IS '【预留·腾讯文档】记录 ID，未同步为空';
 COMMENT ON COLUMN members_phase2.created_at    IS '创建时间';
 COMMENT ON COLUMN members_phase2.updated_at    IS '更新时间，触发器自动维护';
@@ -146,8 +159,8 @@ COMMENT ON COLUMN members_phase2.updated_at    IS '更新时间，触发器自�
 COMMENT ON TABLE audit_phase2 IS '【阶段二 P5】操作留痕表：只追加不修改。核心用途 = PRD_phase2 A5②「给他人放置必须留痕」(action=place_for)。';
 COMMENT ON COLUMN audit_phase2.item_id    IS '被操作的日程 id（items.id）；日程被删除后本行仍保留，故不建 FK';
 COMMENT ON COLUMN audit_phase2.actor_id   IS '操作者 members_phase2.id';
-COMMENT ON COLUMN audit_phase2.action     IS '动作 create/update/delete/place_for';
-COMMENT ON COLUMN audit_phase2.target_id  IS '代排(place_for)时：日程归属给谁（members_phase2.id）；其余动作可空';
+COMMENT ON COLUMN audit_phase2.action     IS '动作 create/update/delete/place_for/set_role';
+COMMENT ON COLUMN audit_phase2.target_id  IS '代排(place_for)时：日程归属给谁（members_phase2.id）；set_role 时：被改角色的成员 id；其余动作可空';
 COMMENT ON COLUMN audit_phase2.detail     IS '人工可读说明，如「把开始时间 09:00 改为 10:00」';
 COMMENT ON COLUMN audit_phase2.created_at IS '发生时间（留痕不设 updated_at：历史不容改写）';
 
@@ -179,5 +192,11 @@ COMMENT ON COLUMN items.meeting_url     IS '【阶段二 P5】单条覆盖的入
  *          COUNT(*) - COUNT(owner_member_id) AS 未标注
  *   FROM items;
  *
- * 幂等验证：把本文件再执行一遍，应无报错、V1/V2/V3 结果不变。
+ * V4）【2026-10-18】在线人数列 + set_role 约束（应各返回 1 行 / 约束含 set_role）
+ *   SELECT column_name FROM information_schema.columns
+ *   WHERE table_name='members_phase2' AND column_name='last_seen_at';
+ *   SELECT pg_get_constraintdef(oid) FROM pg_constraint
+ *   WHERE conname='chk_audit_action';   -- 应含 'set_role'
+ *
+ * 幂等验证：把本文件再执行一遍，应无报错、V1/V2/V3/V4 结果不变。
  * ============================================================ */

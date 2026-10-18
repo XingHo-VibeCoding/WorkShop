@@ -144,6 +144,19 @@
 
           <hr>
 
+          <!-- [阶段二 管理员 UI 2026-10-18] 仅 admin 登录时由 JS 显示（applyRoleUI） -->
+          <section class="set-section" id="member-admin" hidden>
+            <h4>成员管理（管理员）</h4>
+            <p class="set-hint">修改成员角色后，该成员需<b>重新登录</b>方可生效（令牌 7 天有效，期内仍持原角色）。不能修改自己的角色。</p>
+            <div class="member-admin-list" id="member-admin-list"></div>
+            <p class="set-err" id="member-admin-err" hidden></p>
+            <div class="set-actions">
+              <button class="primary" id="btn-save-roles">保存角色更改</button>
+            </div>
+          </section>
+
+          <hr>
+
           <section class="set-section">
             <h4>3 · 通用</h4>
             <label class="set-row">默认启动视图
@@ -203,6 +216,8 @@
     <span id="stat-week-hint"></span>
     <span id="stat-count">事项：0</span>
     <span id="stat-overlap">重叠：无</span>
+    <!-- [阶段二 在线人数 2026-10-18] 心跳近似：登录成员 30s 上报一次，2 分钟窗口内有心跳算在线 -->
+    <span id="stat-online" title="在线人数：登录成员 30 秒上报一次心跳，2 分钟窗口内有心跳计为在线">在线：—</span>
     <span id="stat-sync">同步状态：本地内存（未接入腾讯文档）</span>
   </footer>
 

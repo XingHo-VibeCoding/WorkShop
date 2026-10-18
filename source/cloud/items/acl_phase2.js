@@ -6,7 +6,8 @@
 // 角色（members_phase2.role）：
 //   member   可编辑（默认）
 //   readonly 只读 —— 任何写操作都被拒（本期激活）
-//   admin    管理员 —— 本期不分配，代码里留"全放行"占位（将来接 v1.2）
+//   admin    管理员 —— 库中已实配；patch/delete 对他人项全放行（seam C 落地，
+//            配套管理 UI + 单测 + 线上验收见 verify-admin_phase2.js，2026-10-18）
 //
 // ★ 为什么放应用层（不是 PG RLS）：当前 Bearer 是 service_role，天生绕过 RLS
 //   （TECH_DESIGN §6.3 已定调）；要在接口层挡住越权，必须在这里判定。
@@ -63,7 +64,7 @@ function decideWrite(actor, opts) {
     return { ok: true };                 // 自己的项 → 放行
   }
   if (role === 'admin') {
-    return { ok: true };                 // admin 占位全放行（本期不分配）
+    return { ok: true };                 // admin 全放行（seam C 已落地：库中已实配 admin 账号）
   }
   return { ok: false, code: 403, message: MSG.NOT_OWN };
 }
