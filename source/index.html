@@ -144,6 +144,28 @@
 
           <hr>
 
+          <!-- [阶段二 Step5 口令体系 2026-10-23] 任意登录成员可见（applyRoleUI 控显隐）：
+               自助改口令仅本人知晓（管理员也不可查看，与 resetPasscode 互补） -->
+          <section class="set-section" id="passcode-settings" hidden>
+            <h4>修改我的口令</h4>
+            <p class="set-hint">自助修改的口令<b>仅本人知晓</b>（管理员也不可查看）。新口令至少 6 位；修改后旧令牌 7 天内仍有效，建议重新登录。</p>
+            <label class="set-row">当前口令
+              <input id="pc-old" type="password" autocomplete="current-password" placeholder="输入当前口令" aria-label="当前口令">
+            </label>
+            <label class="set-row">新口令
+              <input id="pc-new" type="password" autocomplete="new-password" placeholder="至少 6 位" aria-label="新口令">
+            </label>
+            <label class="set-row">确认新口令
+              <input id="pc-new2" type="password" autocomplete="new-password" placeholder="再输一次新口令" aria-label="确认新口令">
+            </label>
+            <p class="set-err" id="pc-err" hidden></p>
+            <div class="set-actions">
+              <button class="primary" id="btn-save-passcode">修改口令</button>
+            </div>
+          </section>
+
+          <hr>
+
           <!-- [阶段二 管理员 UI 2026-10-18] 仅 admin 登录时由 JS 显示（applyRoleUI） -->
           <section class="set-section" id="member-admin" hidden>
             <h4>成员管理（管理员）</h4>
@@ -153,6 +175,17 @@
             <div class="set-actions">
               <button class="primary" id="btn-save-roles">保存角色更改</button>
             </div>
+            <!-- [阶段二 Step5 2026-10-23] 添加成员：初始口令随机生成，成功后一次性展示 -->
+            <h4 class="member-admin-sub">添加成员</h4>
+            <div class="member-add">
+              <input id="new-member-name" type="text" placeholder="成员名称" maxlength="30" aria-label="新成员名称">
+              <select id="new-member-role" aria-label="新成员角色">
+                <option value="member">普通成员</option>
+                <option value="readonly">只读成员</option>
+              </select>
+              <button id="btn-add-member">+ 添加成员</button>
+            </div>
+            <p class="set-err" id="member-add-err" hidden></p>
           </section>
 
           <hr>
@@ -208,6 +241,24 @@
       </div>
     </div>
 
+  </div>
+
+  <!-- 一次性口令展示弹窗（Step5 2026-10-23）：重置/添加成员成功后，新口令明文只展示这一次 -->
+  <div class="modal-overlay" id="passcode-modal" hidden>
+    <div class="modal modal-sm" role="dialog" aria-modal="true" aria-label="新口令">
+      <div class="modal-head">
+        <h2 id="pc-modal-title">新口令</h2>
+        <button class="modal-close" id="btn-pc-modal-close" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <p class="set-hint" id="pc-modal-hint"></p>
+        <div class="passcode-display" id="pc-modal-value"></div>
+        <div class="set-actions">
+          <button class="primary" id="btn-pc-copy">复制口令</button>
+          <button id="btn-pc-modal-done">完成</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- 下栏：状态栏 -->

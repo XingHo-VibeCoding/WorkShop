@@ -113,11 +113,13 @@ CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_phase2(actor_id);
 CREATE INDEX IF NOT EXISTS idx_audit_at    ON audit_phase2(created_at);
 
 -- 【2026-10-18 管理员 UI】动作白名单扩展：set_role（管理员改角色）。
+-- 【2026-10-23 Step5 口令体系】再扩展三个：change_passcode（本人改）/ reset_passcode（管理员重置）/ add_member（管理员添加）。
 -- ⚠️ 必须 DROP 后 ADD：audit_phase2 建表时的 CHECK 白名单不含新动作，
---    直接 INSERT set_role 会被约束拒绝（留痕静默丢失）。此处保持幂等可重跑。
+--    直接 INSERT 新动作会被约束拒绝（留痕静默丢失）。此处保持幂等可重跑。
 ALTER TABLE audit_phase2 DROP CONSTRAINT IF EXISTS chk_audit_action;
 ALTER TABLE audit_phase2 ADD CONSTRAINT chk_audit_action
-  CHECK (action IN ('create', 'update', 'delete', 'place_for', 'set_role'));
+  CHECK (action IN ('create', 'update', 'delete', 'place_for', 'set_role',
+                    'change_passcode', 'reset_passcode', 'add_member'));
 
 /* ============================================================
  * 四、updated_at 自动维护（沿用 db/schema.sql 的既有触发器函数）
@@ -196,7 +198,8 @@ COMMENT ON COLUMN items.meeting_url     IS '【阶段二 P5】单条覆盖的入
  *   SELECT column_name FROM information_schema.columns
  *   WHERE table_name='members_phase2' AND column_name='last_seen_at';
  *   SELECT pg_get_constraintdef(oid) FROM pg_constraint
- *   WHERE conname='chk_audit_action';   -- 应含 'set_role'
+ *   WHERE conname='chk_audit_action';
+ *   -- 应含全部 8 个动作：create/update/delete/place_for/set_role/change_passcode/reset_passcode/add_member
  *
  * 幂等验证：把本文件再执行一遍，应无报错、V1/V2/V3/V4 结果不变。
  * ============================================================ */

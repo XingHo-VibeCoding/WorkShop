@@ -13,6 +13,9 @@
 
 const db = require('./db.js');
 
+// —— 【阶段二 Step5】随机口令生成用（管理员重置/添加成员；零依赖铁律，用 Node 内置 crypto）——
+const crypto = require('crypto');
+
 // —— 【Day 23】错误提示统一层 ——
 // 任何意外异常在离开云函数前，都先过这里：翻成一句中文人话给用户，英文原文只写进日志。
 // 分类规则与文案都在 errors.js 里，本文件只负责"接上"。
@@ -120,6 +123,8 @@ const ITEM_TYPES = ['meeting', 'trip', 'travel', 'course', 'class', 'sport', 'li
 const OWNER_KEYS = ['self', 'depta', 'deptb', 'deptc', 'deptd', 'me'];
 // 【阶段二 管理员 UI】可指派的角色白名单（与 db/schema_phase2.sql 的 chk_members_role 一致）
 const MEMBER_ROLES = ['member', 'readonly', 'admin'];
+// 【阶段二 Step5】添加成员的 UI 只给这两档；admin 任命刻意不走 UI（初期只此一条通道＝控制台 SQL，用户 10-22 拍板）
+const ADD_MEMBER_ROLES = ['member', 'readonly'];
 
 // 时间规整：YYYY-MM-DD HH:mm(:ss) → YYYY-MM-DD HH:mm:ss（补秒，便于与库内值精确比对去重）
 // 【Day 24】解析放宽（契约同步）：前端已改成拨轮选时间、不再手打，但脚本 / 将来的导入接口仍会送各种写法，
@@ -641,6 +646,164 @@ async function setRole(event) {
   return { ok: true, data: result.member, error: null };
 }
 
+// —— 【阶段二 Step5】随机口令生成（管理员重置/添加成员用，2026-10-23）——
+// 字符集去掉 0/O/1/l/I：截图或口头传达时看错一位，成员就登录不上，排查半天。
+const PASSCODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+function genPasscode(len = 8) {
+  const n = Math.max(4, Math.min(32, Number(len) || 8));
+  const bytes = crypto.randomBytes(n);
+  let out = '';
+  for (let i = 0; i < n; i++) out += PASSCODE_CHARS[bytes[i] % PASSCODE_CHARS.length];
+  return out;
+}
+
+// 新口令强度规则（自助改口令用；genPasscode 生成的 8 位必过，无需单独校验）。
+// 与 PRD/前端提示口径一致：至少 6 位、最长 64 位。
+function passcodeProblem(p) {
+  if (typeof p !== 'string' || p.length < 6) return '新口令至少 6 位';
+  if (p.length > 64) return '新口令最长 64 位';
+  return null;
+}
+
+// —— 【阶段二 Step5】管理员重置成员口令（2026-10-23，用户 10-22 拍板）——
+// ★ 铁律同 setRole：前端按钮只是体验层，这里是最终审防线。
+//   ① 无令牌/坏令牌 → 401；令牌有效但 role≠admin → 403（身份墙先于一切参数校验）；
+//   ② 目标成员必须存在；允许重置自己（管理员自己的口令忘了也该能自救）；
+//   ③ 新口令随机生成（8 位，去易混字符）+ 换新盐算哈希；
+//   ④ 明文口令【只在这一个响应里回给管理员】，前端一次性展示；
+//      审计只记动作，绝不记口令明文（audit 表不留口令，谁查日志都摸不到）。
+// ⚠️ 已知限制：被重置者的旧令牌 7 天内仍有效（口令与令牌独立签名）→ 前端明示用新口令重新登录。
+async function resetPasscode(event) {
+  const body = getBody(event);
+  const actor = resolveLogin(event);
+  if (!actor) {
+    return { ok: false, data: null, error: { code: 401, message: '请先登录后再重置成员口令' } };
+  }
+  if (String(actor.role || '') !== 'admin') {
+    return { ok: false, data: null, error: { code: 403, message: '只有管理员可以重置成员口令' } };
+  }
+  const memberId = Number(body.memberId);
+  if (!Number.isInteger(memberId) || memberId <= 0) {
+    return { ok: false, data: null, error: { code: 400, message: '缺少必填字段：成员 id' } };
+  }
+  const target = await db.findMemberById(memberId);
+  if (!target) {
+    return { ok: false, data: null, error: { code: 404, message: '目标成员不存在' } };
+  }
+  const plain = genPasscode(8);
+  const salt = crypto.randomBytes(16).toString('hex');   // 16 字节 → 32 字符 hex（与库列宽一致）
+  const identityKey = identity.hashPasscode(plain, salt);
+  const result = await db.updateMemberPasscode(memberId, identityKey, salt);
+  if (result.error) return { ok: false, data: null, error: result.error };
+  if (result.notFound) {
+    return { ok: false, data: null, error: { code: 404, message: '目标成员不存在' } };
+  }
+  await db.insertAudit({
+    actorId: actor.mid,
+    action: 'reset_passcode',
+    targetId: memberId,
+    detail: '管理员重置成员口令（新口令已一次性展示给管理员，此处不留存）',
+  });
+  console.log('[POST /api/resetPasscode] 管理员', actor.mid, '重置成员', memberId, '的口令');
+  return { ok: true, data: { member: result.member, passcode: plain }, error: null };
+}
+
+// —— 【阶段二 Step5】成员自助修改口令（2026-10-23，用户 10-22 追加）——
+// 与 resetPasscode 的分工：这个只改自己（令牌里的 mid 即目标，不存在改他人），
+//   **新值管理员不可见**——自助改的口令只有本人知道，这是刻意的边界设计。
+//   ① 必须登录（401）；
+//   ② 验旧口令（不区分"旧口令错"与别的失败，防试探；错误次数不限——成员量个位数，暂不加限流）；
+//   ③ 新口令 ≥6 位且 ≠ 旧口令；
+//   ④ 审计记 change_passcode（只记动作，不记任何口令）。
+async function changePasscode(event) {
+  const body = getBody(event);
+  const actor = resolveLogin(event);
+  if (!actor) {
+    return { ok: false, data: null, error: { code: 401, message: '请先登录后再修改口令' } };
+  }
+  const oldPass = String(body.oldPasscode || '');
+  const newPass = String(body.newPasscode || '');
+  if (!oldPass || !newPass) {
+    return { ok: false, data: null, error: { code: 400, message: '缺少必填字段：旧口令 / 新口令' } };
+  }
+  const problem = passcodeProblem(newPass);
+  if (problem) {
+    return { ok: false, data: null, error: { code: 400, message: problem } };
+  }
+  if (oldPass === newPass) {
+    return { ok: false, data: null, error: { code: 400, message: '新口令不能与旧口令相同' } };
+  }
+  // 取自己的凭据（salt/identity_key 只在内层流转，绝不出站到响应）
+  const me = await db.findMemberCredentialsById(actor.mid);
+  if (!me) {
+    return { ok: false, data: null, error: { code: 404, message: '成员不存在，请重新登录' } };
+  }
+  if (!identity.verifyPasscode(oldPass, me.salt, me.identity_key)) {
+    console.log('[POST /api/changePasscode] 旧口令校验失败 id=', actor.mid);
+    return { ok: false, data: null, error: { code: 401, message: '旧口令不正确' } };
+  }
+  const salt = crypto.randomBytes(16).toString('hex');
+  const identityKey = identity.hashPasscode(newPass, salt);
+  const result = await db.updateMemberPasscode(actor.mid, identityKey, salt);
+  if (result.error) return { ok: false, data: null, error: result.error };
+  if (result.notFound) {
+    return { ok: false, data: null, error: { code: 404, message: '成员不存在，请重新登录' } };
+  }
+  await db.insertAudit({
+    actorId: actor.mid,
+    action: 'change_passcode',
+    targetId: actor.mid,
+    detail: '本人修改自己的口令',
+  });
+  console.log('[POST /api/changePasscode] 成员', actor.mid, '修改了自己的口令');
+  return { ok: true, data: { changed: true }, error: null };
+}
+
+// —— 【阶段二 Step5】管理员添加成员（2026-10-23，用户 10-22 拍板）——
+//   ① 身份墙同 resetPasscode（401/403 先于参数校验）；
+//   ② 角色只给 member/readonly 两档（ADD_MEMBER_ROLES）；admin 任命不走 UI（见常量注释）；
+//   ③ 重名 409（display_name 无唯一约束，查重在应用层做——先查后插，并发双开的窗口极小，
+//      且 Identity 索引在 identity_key 上，重名不会撞库，最坏是插入成功但名字重复，可人工合并）；
+//   ④ 初始口令随机生成，明文只回这一次；审计不记口令。
+async function addMember(event) {
+  const body = getBody(event);
+  const actor = resolveLogin(event);
+  if (!actor) {
+    return { ok: false, data: null, error: { code: 401, message: '请先登录后再添加成员' } };
+  }
+  if (String(actor.role || '') !== 'admin') {
+    return { ok: false, data: null, error: { code: 403, message: '只有管理员可以添加成员' } };
+  }
+  const name = String(body.displayName || '').trim();
+  if (!name) {
+    return { ok: false, data: null, error: { code: 400, message: '缺少必填字段：成员名称' } };
+  }
+  if (name.length > 60) {
+    return { ok: false, data: null, error: { code: 400, message: '成员名称最长 60 字符' } };
+  }
+  const role = String(body.role || 'member').trim();
+  if (!ADD_MEMBER_ROLES.includes(role)) {
+    return { ok: false, data: null, error: { code: 400, message: `角色取值无效：${role}（应为 ${ADD_MEMBER_ROLES.join(' / ')}）` } };
+  }
+  const dup = await db.findMemberByName(name);
+  if (dup) {
+    return { ok: false, data: null, error: { code: 409, message: '该成员名称已存在，请换一个名称' } };
+  }
+  const plain = genPasscode(8);
+  const salt = crypto.randomBytes(16).toString('hex');
+  const identityKey = identity.hashPasscode(plain, salt);
+  const result = await db.insertMemberWithAuth({ displayName: name, role, identityKey, salt });
+  if (result.error) return { ok: false, data: null, error: result.error };
+  await db.insertAudit({
+    actorId: actor.mid,
+    action: 'add_member',
+    targetId: result.member.id,
+    detail: `管理员添加成员：${name}（${role}）`,
+  });
+  console.log('[POST /api/addMember] 管理员', actor.mid, '添加成员', name, '角色', role);
+  return { ok: true, data: { member: result.member, passcode: plain }, error: null };
+}
+
 // 真正的业务分发（原 exports.main 的本体）。外面再包一层，只为记一行请求日志。
 async function handle(event = {}) {
   const method = getMethod(event);
@@ -720,6 +883,36 @@ async function handle(event = {}) {
     try { return http(event, await setRole(event)); }
     catch (err) {
       logError('POST /api/setRole', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
+    }
+  }
+
+  // 【阶段二 Step5 口令体系】重置他人口令：仅 POST；仅 admin（校验在 resetPasscode 内）
+  if (action === 'resetpasscode' && method === 'POST') {
+    try { return http(event, await resetPasscode(event)); }
+    catch (err) {
+      logError('POST /api/resetPasscode', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
+    }
+  }
+
+  // 【阶段二 Step5 口令体系】自助改口令：仅 POST；任意登录成员（只改自己，校验在 changePasscode 内）
+  if (action === 'changepasscode' && method === 'POST') {
+    try { return http(event, await changePasscode(event)); }
+    catch (err) {
+      logError('POST /api/changePasscode', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
+    }
+  }
+
+  // 【阶段二 Step5 口令体系】添加成员：仅 POST；仅 admin（校验在 addMember 内）
+  if (action === 'addmember' && method === 'POST') {
+    try { return http(event, await addMember(event)); }
+    catch (err) {
+      logError('POST /api/addMember', err);
       const e = toUserError(err);
       return http(event, { ok: false, data: null, error: e }, e.code);
     }

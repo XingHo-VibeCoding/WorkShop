@@ -474,6 +474,22 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .member-row .m-role { padding: 5px 7px; border: 1px solid var(--line); border-radius: 5px; font-size: 13px; font-family: inherit; color: var(--ink); background: #fff; cursor: pointer; }
 .member-row .m-role:hover:not(:disabled) { border-color: var(--accent); }
 .member-row .m-role:disabled { opacity: .45; cursor: not-allowed; }
+.member-row .m-reset { padding: 5px 10px; border: 1px solid var(--line); border-radius: 5px; font-size: 12px; font-family: inherit; color: var(--ink-soft); background: #fff; cursor: pointer; }
+.member-row .m-reset:hover:not(:disabled) { border-color: var(--warn); color: var(--warn); }
+.member-row .m-reset:disabled { opacity: .45; cursor: not-allowed; }
+
+/* 添加成员表单（Step5） */
+.member-admin-sub { margin: 14px 0 8px; font-size: 13px; color: var(--ink); }
+.member-add { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.member-add input { flex: 1; min-width: 120px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 5px; font-size: 13px; font-family: inherit; color: var(--ink); }
+.member-add select { padding: 6px 7px; border: 1px solid var(--line); border-radius: 5px; font-size: 13px; font-family: inherit; color: var(--ink); background: #fff; cursor: pointer; }
+.member-add button { padding: 6px 12px; border: 1px solid var(--line); border-radius: 5px; font-size: 13px; font-family: inherit; background: #fff; cursor: pointer; }
+.member-add button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.member-add button:disabled { opacity: .45; cursor: not-allowed; }
+
+/* 一次性口令展示（Step5）：大号等宽，便于核对/截图 */
+.modal-sm { max-width: 380px; }
+.passcode-display { margin: 4px 0 12px; padding: 12px 14px; border: 1px dashed var(--line); border-radius: 8px; background: var(--bg-soft, #f7f7f5); font-size: 26px; font-weight: 700; letter-spacing: .18em; text-align: center; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; color: var(--ink); user-select: all; }
 
 /* 类型颜色行 */
 .color-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); }

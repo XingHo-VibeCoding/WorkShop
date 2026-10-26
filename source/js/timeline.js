@@ -131,6 +131,7 @@ function isAdmin() {
 }
 function applyRoleUI() {
   const ro = isReadOnly();
+  const me = (window.Auth && typeof window.Auth.currentMember === 'function') ? window.Auth.currentMember() : null;
   const btnNew = document.getElementById('btn-new');
   if (btnNew) btnNew.hidden = ro;
   // 【阶段二 权限收敛 seam B】只读身份：禁用「保存我的会议信息」（后端 updateProfile 同步 403 兜底，见 profile_phase2）
@@ -139,6 +140,9 @@ function applyRoleUI() {
   // 【阶段二 管理员 UI】仅 admin 显示「成员管理」区块
   const memberAdmin = document.getElementById('member-admin');
   if (memberAdmin) memberAdmin.hidden = !isAdmin();
+  // 【阶段二 Step5 口令体系】任意登录成员显示「修改我的口令」（自助改，管理员不可见）
+  const pcSettings = document.getElementById('passcode-settings');
+  if (pcSettings) pcSettings.hidden = !me;
 }
 
 // ---- [Day 20] 真实 API 接线：loadItems 从 mock 切换为调用公网接口 ----
@@ -1563,7 +1567,13 @@ function renderSettings() {
   renderOwnerList();
   renderColorList();
   renderMeetingSettings();  // 【阶段二 P11】加载并接线「我的腾讯会议」
-  if (isAdmin()) renderMemberAdmin();  // 【阶段二 管理员 UI】仅 admin 加载成员管理列表
+  if (isAdmin()) {
+    renderMemberAdmin();  // 【阶段二 管理员 UI】仅 admin 加载成员管理列表
+    // 【阶段二 Step5】添加成员按钮（admin 专属；重置口令按钮在 renderMemberAdmin 内部逐行绑）
+    const btnAdd = document.getElementById('btn-add-member');
+    if (btnAdd) btnAdd.onclick = submitAddMember;
+  }
+  renderPasscodeSettings();  // 【阶段二 Step5】任意登录成员可改自己的口令（匿名时区块隐藏，绑了也无害）
   document.getElementById('set-default-view').value = defaultStartMode;
 }
 
@@ -1647,8 +1657,38 @@ async function renderMemberAdmin() {
         <option value="member"${m.role === 'member' ? ' selected' : ''}>${ROLE_CN.member}</option>
         <option value="readonly"${m.role === 'readonly' ? ' selected' : ''}>${ROLE_CN.readonly}</option>
         <option value="admin"${m.role === 'admin' ? ' selected' : ''}>${ROLE_CN.admin}</option>
-      </select>`;
+      </select>
+      <button class="m-reset" data-id="${m.id}" title="重置该成员口令（新口令将展示一次）">重置口令</button>`;
     listEl.appendChild(row);
+  });
+  // 「重置口令」逐行绑定（confirm 防误触；弹窗展示新口令，后端明文只回一次）
+  listEl.querySelectorAll('.m-reset').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = Number(btn.dataset.id);
+      const target = members.find((x) => Number(x.id) === id);
+      const tname = target ? (target.displayName || ('成员#' + id)) : ('成员#' + id);
+      if (!confirm(`确定重置「${tname}」的口令吗？\n将生成随机新口令，旧口令立即失效。`)) return;
+      btn.disabled = true;
+      try {
+        const res = await fetch(`${API_BASE}/api/items?_action=resetpasscode`, {
+          method: 'POST',
+          headers: (window.Auth ? window.Auth.withHeaders({ 'Content-Type': 'application/json' }) : { 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ memberId: id }),
+        });
+        const j = await res.json().catch(() => null);
+        if (!res.ok || !j || !j.ok) {
+          const msg = (j && j.error && j.error.message) || ('HTTP ' + res.status);
+          if (errEl) { errEl.textContent = res.status === 401 ? '登录已失效，请重新登录后再试' : ('重置失败：' + msg); errEl.hidden = false; }
+          return;
+        }
+        if (errEl) errEl.hidden = true;
+        showPasscodeModal(`「${tname}」的新口令`, '请立即复制并发送给该成员；此口令只展示这一次，刷新后无法再查看。该成员需用新口令重新登录。', j.data.passcode);
+      } catch (e) {
+        if (errEl) { errEl.textContent = '重置失败：' + e.message; errEl.hidden = false; }
+      } finally {
+        btn.disabled = false;
+      }
+    };
   });
   if (errEl) errEl.hidden = true;
   saveBtn.onclick = async () => {
@@ -1695,6 +1735,130 @@ async function renderMemberAdmin() {
       saveBtn.textContent = '保存角色更改';
     }
   };
+}
+
+// —— 【阶段二 Step5 口令体系 2026-10-23】 ——
+// 一次性口令展示弹窗：resetPasscode / addMember 的新口令明文只展示这一次。
+function showPasscodeModal(title, hint, passcode) {
+  const modal = document.getElementById('passcode-modal');
+  const titleEl = document.getElementById('pc-modal-title');
+  const hintEl = document.getElementById('pc-modal-hint');
+  const valueEl = document.getElementById('pc-modal-value');
+  const copyBtn = document.getElementById('btn-pc-copy');
+  const doneBtn = document.getElementById('btn-pc-modal-done');
+  const closeBtn = document.getElementById('btn-pc-modal-close');
+  if (!modal || !valueEl) return;
+  titleEl.textContent = title;
+  hintEl.textContent = hint || '';
+  valueEl.textContent = passcode;
+  modal.hidden = false;
+  const close = () => { modal.hidden = true; valueEl.textContent = ''; };
+  copyBtn.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(passcode);
+      copyBtn.textContent = '已复制 ✓';
+      setTimeout(() => { copyBtn.textContent = '复制口令'; }, 1500);
+    } catch (_) {
+      // 降级：选中文本让用户手动复制（非安全上下文等场景 clipboard API 不可用）
+      const range = document.createRange();
+      range.selectNodeContents(valueEl);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      copyBtn.textContent = '已选中，请手动复制';
+      setTimeout(() => { copyBtn.textContent = '复制口令'; }, 1500);
+    }
+  };
+  doneBtn.onclick = close;
+  closeBtn.onclick = close;
+}
+
+// 设置弹窗「修改我的口令」：任意登录成员可用；新口令仅本人知晓（管理员不可见）。
+function renderPasscodeSettings() {
+  const btn = document.getElementById('btn-save-passcode');
+  const errEl = document.getElementById('pc-err');
+  if (!btn) return;
+  btn.onclick = async () => {
+    const oldPass = document.getElementById('pc-old').value;
+    const newPass = document.getElementById('pc-new').value;
+    const newPass2 = document.getElementById('pc-new2').value;
+    if (errEl) errEl.hidden = true;
+    if (!oldPass || !newPass) {
+      if (errEl) { errEl.textContent = '请填写当前口令和新口令'; errEl.hidden = false; }
+      return;
+    }
+    if (newPass !== newPass2) {
+      if (errEl) { errEl.textContent = '两次输入的新口令不一致'; errEl.hidden = false; }
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = '修改中…';
+    try {
+      const res = await fetch(`${API_BASE}/api/items?_action=changepasscode`, {
+        method: 'POST',
+        headers: (window.Auth ? window.Auth.withHeaders({ 'Content-Type': 'application/json' }) : { 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ oldPasscode: oldPass, newPasscode: newPass }),
+      });
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j || !j.ok) {
+        const msg = (j && j.error && j.error.message) || ('HTTP ' + res.status);
+        if (errEl) { errEl.textContent = '修改失败：' + msg; errEl.hidden = false; }
+        return;
+      }
+      document.getElementById('pc-old').value = '';
+      document.getElementById('pc-new').value = '';
+      document.getElementById('pc-new2').value = '';
+      showToast('口令已修改，请牢记新口令（建议重新登录）');
+    } catch (e) {
+      if (errEl) { errEl.textContent = '修改失败：' + e.message; errEl.hidden = false; }
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '修改口令';
+    }
+  };
+}
+
+// 成员管理区「添加成员」：名字 + 角色两档；初始口令随机生成，成功后弹窗一次性展示并刷新列表。
+function submitAddMember() {
+  const nameEl = document.getElementById('new-member-name');
+  const roleEl = document.getElementById('new-member-role');
+  const errEl = document.getElementById('member-add-err');
+  const btn = document.getElementById('btn-add-member');
+  const name = String(nameEl.value || '').trim();
+  if (!name) {
+    if (errEl) { errEl.textContent = '请填写成员名称'; errEl.hidden = false; }
+    return;
+  }
+  if (errEl) errEl.hidden = true;
+  btn.disabled = true;
+  btn.textContent = '添加中…';
+  fetch(`${API_BASE}/api/items?_action=addmember`, {
+    method: 'POST',
+    headers: (window.Auth ? window.Auth.withHeaders({ 'Content-Type': 'application/json' }) : { 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ displayName: name, role: roleEl.value }),
+  })
+    .then(async (res) => {
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j || !j.ok) {
+        const msg = (j && j.error && j.error.message) || ('HTTP ' + res.status);
+        if (errEl) { errEl.textContent = res.status === 401 ? '登录已失效，请重新登录后再试' : ('添加失败：' + msg); errEl.hidden = false; }
+        return null;
+      }
+      return j;
+    })
+    .then((j) => {
+      if (!j) return;
+      nameEl.value = '';
+      showPasscodeModal(`「${j.data.member.displayName}」的初始口令`, '请立即复制并发送给该成员；此口令只展示这一次，刷新后无法再查看。', j.data.passcode);
+      renderMemberAdmin();   // 刷新成员列表，新成员立即可见
+    })
+    .catch((e) => {
+      if (errEl) { errEl.textContent = '添加失败：' + e.message; errEl.hidden = false; }
+    })
+    .finally(() => {
+      btn.disabled = false;
+      btn.textContent = '+ 添加成员';
+    });
 }
 
 // 【阶段二 在线人数 2026-10-18】心跳：每 30s 轻量上报一次，底栏显示「在线：N」。

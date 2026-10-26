@@ -568,6 +568,128 @@ async function updateMemberRole(mid, role) {
   };
 }
 
+// —— 【阶段二 Step5】按 id 查成员凭据（salt + identity_key；仅供服务端验口令/改口令内部使用）——
+// ★ 与 findMemberById 的分工：那个对外（不含凭据，防泄露离线可破）；这个对内（验旧口令必须拿到盐和哈希）。
+//   返回值绝不直接出站到任何接口响应。
+async function findMemberCredentialsById(id) {
+  const n = Number(id);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  const token = await getBearer();
+  const p = new URLSearchParams();
+  p.set('select', 'id,display_name,role,salt,identity_key,auth_kind');
+  p.set('id', `eq.${n}`);
+  p.set('auth_kind', 'eq.passcode');   // 只认口令成员
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/members_phase2?${p.toString()}`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Accept': 'application/json',
+      'Accept-Profile': SCHEMA,
+      'Content-Profile': SCHEMA,
+    },
+  });
+  const text = await res.text();
+  let json;
+  try { json = JSON.parse(text); }
+  catch (e) { throw new Error(`查询成员凭据返回非 JSON（HTTP ${res.status}）：${text.slice(0, 200)}`); }
+  if (!res.ok) {
+    const msg = (json && (json.message || json.error || json.error_description || json.hint)) || `HTTP ${res.status}`;
+    throw new Error(`查询成员凭据失败：${msg}`);
+  }
+  const rows = Array.isArray(json) ? json : (json && json.data) || [];
+  return rows.length ? rows[0] : null;
+}
+
+// —— 【阶段二 Step5】重置/修改口令：换新盐 + 写新哈希（2026-10-23）——
+// 重置与自助改都走这里：一律换新盐（防旧盐已泄露的边际风险，成本为零）。
+// ★ PATCH 必须带 `id=eq.<具体值>`：PostgREST 的 PATCH 不带过滤条件会【整表更新】（Day 22 同款教训）。
+// 返回：{ member: {id, displayName, role} } 成功 / { notFound: true } id 不存在 / { error } 失败
+async function updateMemberPasscode(mid, identityKey, salt) {
+  const n = Number(mid);
+  if (!Number.isInteger(n) || n <= 0) return { notFound: true };
+  if (!identityKey || !salt) return { error: { code: 500, message: '更新口令缺少盐或哈希（内部错误）' } };
+  const token = await getBearer();
+  const q = new URLSearchParams();
+  q.set('id', `eq.${n}`);   // ★ 同 Day 22 教训：不带条件 = 全库统一口令，灾难
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/members_phase2?${q.toString()}`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Accept-Profile': SCHEMA,
+      'Content-Profile': SCHEMA,
+      'Prefer': 'return=representation',
+    },
+    body: JSON.stringify({ identity_key: String(identityKey), salt: String(salt) }),
+  });
+  const text = await res.text();
+  let json;
+  try { json = JSON.parse(text); }
+  catch (e) {
+    return { error: { code: 500, message: `改口令返回非 JSON（HTTP ${res.status}）：${text.slice(0, 200)}` } };
+  }
+  if (!res.ok) {
+    const msg = (json && (json.message || json.error || json.error_description || json.hint)) || `HTTP ${res.status}`;
+    return { error: { code: res.status, message: `更新成员口令失败：${msg}` } };
+  }
+  const rows = Array.isArray(json) ? json : (json && json.data) || [];
+  if (!rows.length) return { notFound: true };
+  return {
+    member: {
+      id: rows[0].id,
+      displayName: rows[0].display_name || '',
+      role: rows[0].role || 'member',
+    },
+  };
+}
+
+// —— 【阶段二 Step5】管理员添加成员（带初始口令，2026-10-23）——
+// display_name 无唯一约束（重名检查在 index.js 的 addMember 层做，返 409）；
+// identity_key 有唯一索引 —— 每次新盐 → 新哈希，不会撞。
+// 返回：{ member: {id, displayName, role} } 成功 / { error } 失败
+async function insertMemberWithAuth({ displayName, role, identityKey, salt }) {
+  const name = String(displayName || '').trim();
+  if (!name) return { error: { code: 400, message: '成员名称不能为空' } };
+  const token = await getBearer();
+  const row = {
+    display_name: name,
+    role: String(role || 'member'),
+    auth_kind: 'passcode',
+    identity_key: String(identityKey),
+    salt: String(salt),
+  };
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/members_phase2`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Accept-Profile': SCHEMA,
+      'Content-Profile': SCHEMA,
+      'Prefer': 'return=representation',
+    },
+    body: JSON.stringify([row]),
+  });
+  const text = await res.text();
+  let json;
+  try { json = JSON.parse(text); }
+  catch (e) {
+    return { error: { code: 500, message: `添加成员返回非 JSON（HTTP ${res.status}）：${text.slice(0, 200)}` } };
+  }
+  if (!res.ok) {
+    const msg = (json && (json.message || json.error || json.error_description || json.hint)) || `HTTP ${res.status}`;
+    return { error: { code: res.status, message: `添加成员失败：${msg}` } };
+  }
+  const rows = Array.isArray(json) ? json : (json && json.data) || [];
+  if (!rows.length) return { error: { code: 500, message: '添加成员未返回创建结果' } };
+  return {
+    member: {
+      id: rows[0].id,
+      displayName: rows[0].display_name || '',
+      role: rows[0].role || 'member',
+    },
+  };
+}
+
 module.exports = {
   queryItems,
   findDuplicate,
@@ -585,4 +707,8 @@ module.exports = {
   touchMember,
   countOnline,
   updateMemberRole,
+  // 【阶段二 Step5 口令体系 2026-10-23】
+  findMemberCredentialsById,
+  updateMemberPasscode,
+  insertMemberWithAuth,
 };

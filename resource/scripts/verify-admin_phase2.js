@@ -1,13 +1,14 @@
 #!/usr/bin/env node
-// WorkShop · 阶段二 管理员 UI + 在线人数 · 验收脚本（2026-10-18）
+// WorkShop · 阶段二 管理员 UI + 在线人数 + 口令体系 · 验收脚本（2026-10-18 建，2026-10-23 扩军）
 // ---------------------------------------------------------------------------
 // 两部分：
 //   A 离线单测（总是跑、不联网）：
 //      A1 ACL admin 全矩阵（decideWrite，seam C 第 2 项「管理员可改他人日程」）
-//      A2 db.js 三函数 mock-fetch 测试（touchMember / countOnline / updateMemberRole）
-//         —— 重点盯「PATCH 必须带 id=eq.」：不带条件 = 整表更新/整表改角色（Day 22 同款灾难）
-//   B 线上行为校验（仅 --live 时跑，需联网 + 凭据）：
-//      setRole 四类越权（401/403×2/400/404）+ admin 正常改 + 心跳有/无令牌
+//      A2 db.js mock-fetch 测试（touchMember / countOnline / updateMemberRole /
+//         findMemberCredentialsById / updateMemberPasscode / insertMemberWithAuth）
+//         —— 重点盯「PATCH 必须带 id=eq.」：不带条件 = 整表更新/整表改口令（Day 22 同款灾难）
+//      A3 index.js 控制流测试（setRole / heartbeat / resetPasscode / changePasscode / addMember）
+//   B 线上行为校验（仅 --live 时跑，需联网 + 凭据）
 //
 // 用法：
 //   node resource/scripts/verify-admin_phase2.js            # 只跑离线单测
@@ -16,7 +17,9 @@
 // 线上校验所需环境变量（--live 时）：
 //   WORKSHOP_ADMIN_NAME/PASS   一名 role=admin 的成员（库中已有，口令用户掌握）
 //   WORKSHOP_TEST_MEMBER/PASS  一名 role=member 的测试成员（验 403 越权用）
+//                                 ★ 注意变量名是 TEST_PASS，不是 TEST_MEMBER_PASS
 //   WORKSHOP_RO_MEMBER/PASS    一名 role=readonly 的测试成员（验 403 越权用）
+//                                 ★ 变量名是 RO_PASS
 //
 // 退出码：0 全部通过；1 有失败。
 // ---------------------------------------------------------------------------
@@ -141,6 +144,79 @@ function runDbOffline() {
       global.fetch = async () => { throw new Error('不该被调用'); };
       const r3 = await db.updateMemberRole(-1, 'admin');
       check('updateMemberRole 非法 mid 短路不发请求', r3.notFound === true && calls.length === 0, JSON.stringify(r3));
+
+      // ===================== Step5 口令体系：db 三新函数 =====================
+      // 换一版更精细的 mock（按 URL 特征分流，避免与上面的场景串味）
+      global.fetch = async (url, opts) => {
+        const u = String(url);
+        const method = (opts && opts.method) || 'GET';
+        let parsed = null;
+        if (opts && opts.body) {
+          parsed = typeof opts.body === 'string' ? JSON.parse(opts.body) : opts.body;
+        }
+        const body = Array.isArray(parsed) ? parsed[0] : parsed;   // 插入类 body 是 [row] 数组
+        calls.push({ u, method, body });
+        // ① 查凭据：GET + select 含 salt,identity_key
+        if (u.includes('members_phase2') && method === 'GET' && u.includes('identity_key')) {
+          return { ok: true, status: 200, text: async () => JSON.stringify([{ id: 1, display_name: '测试-member', role: 'member', salt: 'a'.repeat(32), identity_key: 'b'.repeat(128), auth_kind: 'passcode' }]) };
+        }
+        // ② 改口令：PATCH + body 有 identity_key（没有 role / last_seen_at）
+        if (u.includes('members_phase2') && method === 'PATCH' && body && body.identity_key) {
+          return { ok: true, status: 200, text: async () => JSON.stringify([{ id: 1, display_name: '测试-member', role: 'member' }]) };
+        }
+        // ③ 添加成员：POST + body 是数组
+        if (u.includes('members_phase2') && method === 'POST') {
+          return { ok: true, status: 200, text: async () => JSON.stringify([{ id: 9, display_name: body.display_name, role: body.role }]) };
+        }
+        return { ok: false, status: 500, text: async () => 'mock: 未覆盖的请求 ' + method + ' ' + u };
+      };
+
+      // —— findMemberCredentialsById ——
+      calls.length = 0;
+      const cred = await db.findMemberCredentialsById(1);
+      const gc = calls[0];
+      check('findMemberCredentialsById 返回盐+哈希', !!cred && cred.salt === 'a'.repeat(32) && cred.identity_key === 'b'.repeat(128), JSON.stringify(cred));
+      check('findMemberCredentialsById ★带 id=eq. 过滤', !!gc && gc.u.includes('id=eq.1'), gc && gc.u);
+      check('findMemberCredentialsById 限定 auth_kind=passcode', !!gc && gc.u.includes('auth_kind=eq.passcode'), gc && gc.u);
+      const cred0 = await db.findMemberCredentialsById(0);
+      check('findMemberCredentialsById 非法 id 返回 null 不发请求', cred0 === null, JSON.stringify(cred0));
+
+      // —— updateMemberPasscode ——
+      calls.length = 0;
+      const up = await db.updateMemberPasscode(1, 'c'.repeat(128), 'd'.repeat(32));
+      const pc = calls[0];
+      check('updateMemberPasscode 返回 member 映射', !!up.member && up.member.id === 1, JSON.stringify(up));
+      check('updateMemberPasscode ★带 id=eq. 过滤（防全库统一口令）', !!pc && pc.u.includes('id=eq.1'), pc && pc.u);
+      check('updateMemberPasscode body 含新盐+新哈希', !!pc && pc.body && pc.body.identity_key === 'c'.repeat(128) && pc.body.salt === 'd'.repeat(32), pc && JSON.stringify(pc.body));
+
+      global.fetch = async (url, opts) => {
+        if (String(url).includes('members_phase2') && (opts && opts.method) === 'PATCH') {
+          return { ok: true, status: 200, text: async () => '[]' };   // 影响 0 行
+        }
+        return { ok: false, status: 500, text: async () => 'mock: unexpected' };
+      };
+      const up0 = await db.updateMemberPasscode(999, 'c'.repeat(128), 'd'.repeat(32));
+      check('updateMemberPasscode 0 行命中 → notFound', up0.notFound === true, JSON.stringify(up0));
+
+      // —— insertMemberWithAuth ——
+      global.fetch = async (url, opts) => {
+        calls.push({ u: String(url), method: (opts && opts.method) || 'GET', body: (opts && opts.body) ? JSON.parse(opts.body)[0] : null });
+        if (String(url).includes('members_phase2') && (opts && opts.method) === 'POST') {
+          const row = JSON.parse(opts.body)[0];
+          return { ok: true, status: 200, text: async () => JSON.stringify([{ id: 9, display_name: row.display_name, role: row.role }]) };
+        }
+        return { ok: false, status: 500, text: async () => 'mock: unexpected' };
+      };
+      calls.length = 0;
+      const ins = await db.insertMemberWithAuth({ displayName: '新成员', role: 'readonly', identityKey: 'e'.repeat(128), salt: 'f'.repeat(32) });
+      const ic = calls[0];
+      check('insertMemberWithAuth 返回新成员映射', !!ins.member && ins.member.id === 9 && ins.member.role === 'readonly', JSON.stringify(ins));
+      check('insertMemberWithAuth 用 POST + auth_kind=passcode', !!ic && ic.method === 'POST' && ic.body && ic.body.auth_kind === 'passcode', ic && JSON.stringify(ic.body));
+      check('insertMemberWithAuth 空名字直接 error 不发请求', (await (async () => {
+        calls.length = 0;
+        const bad = await db.insertMemberWithAuth({ displayName: '  ', role: 'member', identityKey: 'x', salt: 'y' });
+        return bad.error && calls.length === 0;
+      })()) === true);
     } catch (e) {
       check('A2 执行过程无异常', false, e && e.message);
     } finally {
@@ -178,6 +254,16 @@ function runFlowOffline() {
   db.insertAudit = async (row) => { auditCalls.push(row); };
   db.touchMember = async (mid) => { touched.push(mid); };
   db.countOnline = async () => 5;
+
+  // —— Step5 打桩（口令体系三端点）——
+  const SALT_OLD = 'ab'.repeat(16);                    // 32 字符 hex
+  const HASH_OLD = identity.hashPasscode('oldpass123', SALT_OLD);   // 真哈希，让旧口令校验真跑
+  db.findMemberCredentialsById = async (id) => (Number(id) === 1
+    ? { id: 1, display_name: '测试-member', role: 'member', salt: SALT_OLD, identity_key: HASH_OLD, auth_kind: 'passcode' }
+    : null);
+  db.updateMemberPasscode = async (id, key, salt) => ({ member: { id, displayName: '测试-member', role: 'member' } });
+  db.insertMemberWithAuth = async (row) => ({ member: { id: 9, displayName: row.displayName, role: row.role } });
+  db.findMemberByName = async (name) => (String(name) === '已存在' ? { id: 5, display_name: '已存在' } : null);
 
   return (async () => {
     const adminTok = token('admin', 3);
@@ -227,6 +313,81 @@ function runFlowOffline() {
     touched = [];
     r = await idx.main(evt('heartbeat', {}, 'bad.token.sig'));
     check('heartbeat 坏令牌 → 200 且不 touch（不误判登录失效）', r.statusCode === 200 && touched.length === 0, `status=${r.statusCode}`);
+
+    // ===================== Step5：resetPasscode =====================
+    console.log('\n──────── A3b. 控制流测试（resetPasscode / changePasscode / addMember） ────────');
+    r = await idx.main(evt('resetpasscode', { memberId: 7 }));
+    check('resetPasscode 无令牌 → 401', r.statusCode === 401, `status=${r.statusCode}`);
+
+    r = await idx.main(evt('resetpasscode', { memberId: 7 }, memberTok));
+    check('resetPasscode member 令牌 → 403', r.statusCode === 403, `status=${r.statusCode}`);
+
+    r = await idx.main(evt('resetpasscode', { memberId: 'abc' }, adminTok));
+    check('resetPasscode 非法 memberId → 400', r.statusCode === 400, `status=${r.statusCode}`);
+
+    r = await idx.main(evt('resetpasscode', { memberId: 999 }, adminTok));
+    check('resetPasscode 不存在成员 → 404', r.statusCode === 404, `status=${r.statusCode}`);
+
+    auditCalls = [];
+    r = await idx.main(evt('resetpasscode', { memberId: 7 }, adminTok));
+    b = bodyOf(r);
+    check('resetPasscode admin 正常 → 200 且回 8 位口令', r.statusCode === 200 && b.ok && b.data && /^[A-HJ-NP-Z2-9]{8}$/.test(b.data.passcode || ''), `status=${r.statusCode} pass=${b.data && b.data.passcode}`);
+    check('resetPasscode 留痕 reset_passcode（actor/target 对，且 detail 不含口令明文）',
+      auditCalls.length === 1 && auditCalls[0].action === 'reset_passcode' && auditCalls[0].actorId === 3 && auditCalls[0].targetId === 7
+      && !(auditCalls[0].detail || '').includes(b.data && b.data.passcode),
+      JSON.stringify(auditCalls));
+
+    // ===================== Step5：changePasscode =====================
+    r = await idx.main(evt('changepasscode', { oldPasscode: 'oldpass123', newPasscode: 'newpass123' }));
+    check('changePasscode 无令牌 → 401', r.statusCode === 401, `status=${r.statusCode}`);
+
+    r = await idx.main(evt('changepasscode', { newPasscode: 'newpass123' }, memberTok));
+    check('changePasscode 缺旧口令 → 400', r.statusCode === 400, `status=${r.statusCode}`);
+
+    r = await idx.main(evt('changepasscode', { oldPasscode: 'oldpass123', newPasscode: '123' }, memberTok));
+    check('changePasscode 新口令太短 → 400', r.statusCode === 400, `status=${r.statusCode}`);
+
+    r = await idx.main(evt('changepasscode', { oldPasscode: 'oldpass123', newPasscode: 'oldpass123' }, memberTok));
+    check('changePasscode 新旧相同 → 400', r.statusCode === 400, `status=${r.statusCode}`);
+
+    r = await idx.main(evt('changepasscode', { oldPasscode: 'wrongone', newPasscode: 'newpass123' }, memberTok));
+    check('changePasscode 旧口令错 → 401', r.statusCode === 401, `status=${r.statusCode}`);
+
+    auditCalls = [];
+    r = await idx.main(evt('changepasscode', { oldPasscode: 'oldpass123', newPasscode: 'newpass123' }, memberTok));
+    b = bodyOf(r);
+    check('changePasscode 正常 → 200 且 changed=true', r.statusCode === 200 && b.ok && b.data && b.data.changed === true, `status=${r.statusCode}`);
+    check('changePasscode 留痕 change_passcode（actor=target=自己，无口令明文）',
+      auditCalls.length === 1 && auditCalls[0].action === 'change_passcode' && auditCalls[0].actorId === 1 && auditCalls[0].targetId === 1,
+      JSON.stringify(auditCalls));
+
+    // ===================== Step5：addMember =====================
+    r = await idx.main(evt('addmember', { displayName: '新成员' }));
+    check('addMember 无令牌 → 401', r.statusCode === 401, `status=${r.statusCode}`);
+
+    r = await idx.main(evt('addmember', { displayName: '新成员' }, memberTok));
+    check('addMember member 令牌 → 403', r.statusCode === 403, `status=${r.statusCode}`);
+
+    r = await idx.main(evt('addmember', { displayName: '  ' }, adminTok));
+    check('addMember 空名字 → 400', r.statusCode === 400, `status=${r.statusCode}`);
+
+    r = await idx.main(evt('addmember', { displayName: 'x'.repeat(61) }, adminTok));
+    check('addMember 超长名字（>60）→ 400', r.statusCode === 400, `status=${r.statusCode}`);
+
+    r = await idx.main(evt('addmember', { displayName: '新管理员', role: 'admin' }, adminTok));
+    check('addMember admin 角色被拒（UI 通道刻意不给）→ 400', r.statusCode === 400, `status=${r.statusCode}`);
+
+    r = await idx.main(evt('addmember', { displayName: '已存在' }, adminTok));
+    check('addMember 重名 → 409', r.statusCode === 409, `status=${r.statusCode}`);
+
+    auditCalls = [];
+    r = await idx.main(evt('addmember', { displayName: '新成员', role: 'readonly' }, adminTok));
+    b = bodyOf(r);
+    check('addMember 正常 → 200 且回 8 位初始口令', r.statusCode === 200 && b.ok && b.data && /^[A-HJ-NP-Z2-9]{8}$/.test(b.data.passcode || ''), `status=${r.statusCode}`);
+    check('addMember 留痕 add_member（actor/target 对，detail 不含口令明文）',
+      auditCalls.length === 1 && auditCalls[0].action === 'add_member' && auditCalls[0].actorId === 3 && auditCalls[0].targetId === 9
+      && !(auditCalls[0].detail || '').includes(b.data && b.data.passcode),
+      JSON.stringify(auditCalls));
   })();
 }
 
@@ -313,6 +474,70 @@ async function runLive() {
     } else {
       console.log('  ⚠️ 跳过 readonly 越权校验：缺少 WORKSHOP_RO_MEMBER / WORKSHOP_RO_PASS');
     }
+
+    // ===================== Step5 口令体系：线上链路 =====================
+    console.log('\n  —— Step5 口令体系（addMember → resetPasscode → changePasscode 全链路） ——');
+    // ① admin 添加成员 → 拿初始口令
+    const add1 = await req('POST', 'addmember', { displayName: '验收丙-L', role: 'member' }, admin.token);
+    check('addMember admin 正常 → 200 且回 8 位初始口令',
+      add1.status === 200 && add1.j && add1.j.ok && /^[A-HJ-NP-Z2-9]{8}$/.test(add1.j.data.passcode || ''),
+      `status=${add1.status}`);
+    const newbie = add1.j && add1.j.data && add1.j.data.member;
+    const initialPass = add1.j && add1.j.data && add1.j.data.passcode;
+    if (!newbie || !initialPass) {
+      check('addMember 返回新成员与口令（后续链路的前置）', false, JSON.stringify(add1.j));
+    } else {
+      // ② 新成员用初始口令登录（证明初始口令链路通）
+      let li;
+      try { li = await login('验收丙-L', initialPass); } catch (e) { li = null; }
+      check('新成员初始口令可登录', !!li && !!li.token, li ? 'ok' : '登录失败');
+
+      // ③ admin 重置该成员口令 → 拿新口令
+      const rs = await req('POST', 'resetpasscode', { memberId: newbie.id }, admin.token);
+      const resetPass = rs.j && rs.j.ok && rs.j.data && rs.j.data.passcode;
+      check('resetPasscode admin 正常 → 200 且回新口令',
+        rs.status === 200 && /^[A-HJ-NP-Z2-9]{8}$/.test(resetPass || ''), `status=${rs.status}`);
+      // ④ 新口令可登录（证明重置链路通）
+      let li2;
+      try { li2 = await login('验收丙-L', resetPass); } catch (e) { li2 = null; }
+      check('重置后新口令可登录', !!li2 && !!li2.token, li2 ? 'ok' : '登录失败');
+
+      // ⑤ 自助改口令（旧=重置来的新口令，新=固定值）
+      const ch = await req('POST', 'changepasscode', { oldPasscode: resetPass, newPasscode: 'SelfChange2026' }, li2 && li2.token);
+      check('changePasscode 正常 → 200', ch.status === 200 && ch.j && ch.j.ok && ch.j.data && ch.j.data.changed === true, `status=${ch.status}`);
+      // ⑥ 自助改后的口令可登录（证明自助改链路通；且证明 resetPass 已失效是预期内的）
+      let li3;
+      try { li3 = await login('验收丙-L', 'SelfChange2026'); } catch (e) { li3 = null; }
+      check('自助改后新口令可登录', !!li3 && !!li3.token, li3 ? 'ok' : '登录失败');
+
+      // ⑦ 旧口令应已失效（resetPass 再登录应失败）
+      let li4err = null;
+      try { await login('验收丙-L', resetPass); } catch (e) { li4err = e; }
+      check('旧口令（重置前那把）已失效', !!li4err, li4err ? '已失效' : '仍可登录（预期外）');
+    }
+
+    // ⑧ addMember 越权与参数分支
+    const addDup = await req('POST', 'addmember', { displayName: '验收丙-L', role: 'member' }, admin.token);
+    check('addMember 重名 → 409', addDup.status === 409, `status=${addDup.status}`);
+    const addBadRole = await req('POST', 'addmember', { displayName: '越权角色', role: 'admin' }, admin.token);
+    check('addMember admin 角色 → 400（UI 通道刻意不给）', addBadRole.status === 400, `status=${addBadRole.status}`);
+    const addNoTok = await req('POST', 'addmember', { displayName: '无令牌' });
+    check('addMember 无令牌 → 401', addNoTok.status === 401, `status=${addNoTok.status}`);
+    if (testMember && testPass) {
+      const m2 = await login(testMember, testPass);
+      const addByM = await req('POST', 'addmember', { displayName: 'member 建的号', role: 'member' }, m2.token);
+      check('addMember member 令牌 → 403', addByM.status === 403, `status=${addByM.status}`);
+      const rsNoTok = await req('POST', 'resetpasscode', { memberId: admin.member.id });
+      check('resetPasscode 无令牌 → 401', rsNoTok.status === 401, `status=${rsNoTok.status}`);
+      const rsByM = await req('POST', 'resetpasscode', { memberId: admin.member.id }, m2.token);
+      check('resetPasscode member 令牌 → 403', rsByM.status === 403, `status=${rsByM.status}`);
+    }
+    const chNoTok = await req('POST', 'changepasscode', { oldPasscode: 'x', newPasscode: 'y' });
+    check('changePasscode 无令牌 → 401', chNoTok.status === 401, `status=${chNoTok.status}`);
+    const chBadOld = await req('POST', 'changepasscode', { oldPasscode: 'wrong', newPasscode: 'newpass123' }, admin.token);
+    check('changePasscode 旧口令错 → 401', chBadOld.status === 401, `status=${chBadOld.status}`);
+    console.log('  ℹ️ 线上验收产生的「验收丙-L」为一次性测试账号；如想清理：');
+    console.log("     DELETE FROM members_phase2 WHERE display_name = '验收丙-L';（控制台执行，可选）");
   } catch (e) {
     console.log('\n❌ 线上校验异常：', e.message); fail++;
   }
