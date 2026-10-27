@@ -113,16 +113,75 @@ CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_phase2(actor_id);
 CREATE INDEX IF NOT EXISTS idx_audit_at    ON audit_phase2(created_at);
 
 -- 【2026-10-18 管理员 UI】动作白名单扩展：set_role（管理员改角色）。
--- 【2026-10-23 Step5 口令体系】再扩展三个：change_passcode（本人改）/ reset_passcode（管理员重置）/ add_member（管理员添加）。
+-- 【2026-07-17 Step5 口令体系】再扩展三个：change_passcode（本人改）/ reset_passcode（管理员重置）/ add_member（管理员添加）。
+-- 【2026-10-27 多团队】再扩展一个：create_team（管理员建团队）。
 -- ⚠️ 必须 DROP 后 ADD：audit_phase2 建表时的 CHECK 白名单不含新动作，
 --    直接 INSERT 新动作会被约束拒绝（留痕静默丢失）。此处保持幂等可重跑。
 ALTER TABLE audit_phase2 DROP CONSTRAINT IF EXISTS chk_audit_action;
 ALTER TABLE audit_phase2 ADD CONSTRAINT chk_audit_action
   CHECK (action IN ('create', 'update', 'delete', 'place_for', 'set_role',
-                    'change_passcode', 'reset_passcode', 'add_member'));
+                    'change_passcode', 'reset_passcode', 'add_member', 'create_team'));
 
 /* ============================================================
- * 四、updated_at 自动维护（沿用 db/schema.sql 的既有触发器函数）
+ * 四、多团队隔离（多租户，2026-10-27 用户要求落地）
+ * ------------------------------------------------------------
+ * 目标：不同团队拥有各自独立的日程表，互不互通。
+ *
+ * 三条铁律：
+ *   1) team_id 是数据访问的硬约束 —— db.js 里每条涉及团队数据的查询都必传 teamId，
+ *      缺参数直接抛错（绝不静默退化成"返回全库"）。
+ *   2) items / members / audit 三张表都要带 team_id。items 的读/改/删必须按 team_id 过滤，
+ *      否则「知道 id 就能改别的团队的日程」。
+ *   3) 团队归属以【服务端查库】为准，不单纯信任令牌里的 tid。
+ *
+ * 迁移策略：现有全部数据归入「默认团队」，老用户与老数据零感知。
+ *   登录时 teamCode 可选 —— 不填则全局按名字找，唯一命中即登录（现有用户无感）；
+ *   只有重名时才要求填团队码。
+ * ============================================================ */
+
+CREATE TABLE IF NOT EXISTS teams_phase2 (
+  id          SERIAL PRIMARY KEY,
+  name        VARCHAR(60) NOT NULL,
+  /* 团队码 / 邀请码：既是登录时的团队定位码，也是成员自助加入的凭据。
+     做成短横线大写，方便口头传达（如 WS-DEFAULT、WS-8F3K2） */
+  join_code   VARCHAR(32) NOT NULL UNIQUE,
+  note        TEXT,
+  created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 默认团队（幂等）：现有 11 条日程与全部成员迁到这里
+INSERT INTO teams_phase2 (name, join_code)
+VALUES ('默认团队', 'WS-DEFAULT')
+ON CONFLICT (join_code) DO NOTHING;
+
+-- 三张表加团队维度。
+-- 为什么不设 NOT NULL：迁移期先加可空列 → 回填 → 之后业务层强校验。
+-- 直接 NOT NULL 会让存量行迁移瞬间失败。
+ALTER TABLE items         ADD COLUMN IF NOT EXISTS team_id INT;
+ALTER TABLE members_phase2 ADD COLUMN IF NOT EXISTS team_id INT;
+ALTER TABLE audit_phase2  ADD COLUMN IF NOT EXISTS team_id INT;
+
+-- 回填：所有历史数据归入默认团队（幂等：只补 NULL 的）
+UPDATE items SET team_id = (SELECT id FROM teams_phase2 WHERE join_code = 'WS-DEFAULT')
+ WHERE team_id IS NULL;
+UPDATE members_phase2 SET team_id = (SELECT id FROM teams_phase2 WHERE join_code = 'WS-DEFAULT')
+ WHERE team_id IS NULL;
+UPDATE audit_phase2 SET team_id = (SELECT id FROM teams_phase2 WHERE join_code = 'WS-DEFAULT')
+ WHERE team_id IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_items_team      ON items(team_id);
+CREATE INDEX IF NOT EXISTS idx_items_team_time ON items(team_id, start_time);
+CREATE INDEX IF NOT EXISTS idx_members_team    ON members_phase2(team_id);
+CREATE INDEX IF NOT EXISTS idx_audit_team      ON audit_phase2(team_id);
+
+-- 团队内成员名唯一（同名可以出现在不同团队）；空名不参与唯一约束，
+-- 否则两个"尚未命名"的成员会互相冲突。
+CREATE UNIQUE INDEX IF NOT EXISTS ux_members_team_name
+  ON members_phase2(team_id, display_name) WHERE display_name <> '';
+
+/* ============================================================
+ * 五、updated_at 自动维护（沿用 db/schema.sql 的既有触发器函数）
  * ------------------------------------------------------------
  * set_updated_at() 已由 db/schema.sql 创建；此处 CREATE OR REPLACE 保证幂等
  * （若函数已存在且体相同，重跑无副作用）。
@@ -140,7 +199,7 @@ CREATE TRIGGER trg_members_phase2_updated BEFORE UPDATE ON members_phase2
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 /* ============================================================
- * 五、表 / 字段注释
+ * 六、表 / 字段注释
  * ============================================================ */
 COMMENT ON TABLE members_phase2 IS '【阶段二 P5】成员/身份表：真实登录的人（与 owners「部门标签」两个维度分开）。passcode 方案下 identity_key 存 scrypt 哈希，明文口令只出现在生成那一刻。';
 COMMENT ON COLUMN members_phase2.id            IS '主键，SERIAL 自增；items.owner_member_id / created_by / updated_by 指向它（应用层关联，无 FK，便于迁移腾讯文档）';
@@ -173,8 +232,15 @@ COMMENT ON COLUMN items.border_color    IS '【阶段二 P5】协作外框色，
 COMMENT ON COLUMN items.meeting_no      IS '【阶段二 P5】单条覆盖的会议号；优先级 items > members_phase2（TECH_DESIGN §8.1）';
 COMMENT ON COLUMN items.meeting_url     IS '【阶段二 P5】单条覆盖的入会链接；未配置两者都空则不显示入会入口（不报错、不空链）。仅对 type=meeting 生效';
 
+/* —— 2026-10-27 多团队隔离 —— */
+COMMENT ON TABLE  teams_phase2 IS '【2026-10-27 多租户】团队表。目标：不同团队独立日程表、互不互通。join_code 既是登录定位码也是自助加入的邀请码。';
+COMMENT ON COLUMN teams_phase2.join_code IS '团队码/邀请码（大写短横线，如 WS-DEFAULT）：登录时可填、注册时必须填；唯一';
+COMMENT ON COLUMN items.team_id          IS '【2026-10-27】所属团队。★读/改/删都必须带此条件，否则跨团队越权。历史数据回填为默认团队';
+COMMENT ON COLUMN members_phase2.team_id IS '【2026-10-27】所属团队；团队内 display_name 唯一（跨团队可同名）。团队归属以库为准，不只信令牌';
+COMMENT ON COLUMN audit_phase2.team_id   IS '【2026-10-27】留痕所属团队，便于按团队审计';
+
 /* ============================================================
- * 六、验证 SQL（在控制台逐句单独执行，不要和业务变更一起跑）
+ * 七、验证 SQL（在控制台逐句单独执行，不要和业务变更一起跑）
  * ------------------------------------------------------------
  * V1）新列是否存在（应返回 6 行）
  *   SELECT column_name, data_type, character_maximum_length
@@ -201,5 +267,23 @@ COMMENT ON COLUMN items.meeting_url     IS '【阶段二 P5】单条覆盖的入
  *   WHERE conname='chk_audit_action';
  *   -- 应含全部 8 个动作：create/update/delete/place_for/set_role/change_passcode/reset_passcode/add_member
  *
- * 幂等验证：把本文件再执行一遍，应无报错、V1/V2/V3/V4 结果不变。
+ * V5）【2026-10-27 多团队隔离】团队表 + 三处 team_id + 回填是否干净
+ *   -- ① 默认团队存在且只有一条（应 1 行：默认团队 / WS-DEFAULT）
+ *   SELECT id, name, join_code FROM teams_phase2;
+ *   -- ② 三张表的 team_id 列都在（应 3 行）
+ *   SELECT table_name, column_name FROM information_schema.columns
+ *   WHERE column_name='team_id'
+ *     AND table_name IN ('items','members_phase2','audit_phase2');
+ *   -- ③ ★ 回填完整性：三列都应返回 0（有孤儿行说明回填漏了）
+ *   SELECT
+ *     (SELECT COUNT(*) FROM items         WHERE team_id IS NULL) AS items_无团队,
+ *     (SELECT COUNT(*) FROM members_phase2 WHERE team_id IS NULL) AS members_无团队,
+ *     (SELECT COUNT(*) FROM audit_phase2  WHERE team_id IS NULL) AS audit_无团队;
+ *   -- ④ 数据无损：仍应为 11
+ *   SELECT COUNT(*) FROM items;
+ *
+ * 幂等验证：把本文件再执行一遍，应无报错、V1~V5 结果不变。
+ * 执行顺序铁律：**先跑本文件的 SQL，再重传 items 云函数**。
+ *   反了会怎样：新函数按 team_id 过滤，而列还没加 → 所有查询 500。
+ *   反过来（先 SQL 后函数）是安全的：旧函数不写 team_id，新列可空，互不影响。
  * ============================================================ */

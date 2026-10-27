@@ -186,6 +186,20 @@
               <button id="btn-add-member">+ 添加成员</button>
             </div>
             <p class="set-err" id="member-add-err" hidden></p>
+
+            <!-- [2026-10-27 多团队] 团队信息 + 建团队：团队码即邀请码，别人拿它自助加入 -->
+            <h4 class="member-admin-sub">团队</h4>
+            <p class="set-hint">不同团队的数据<b>完全隔离</b>，互相看不到对方的日程。把团队码发给同事，他们在登录页点「用团队邀请码加入」即可。</p>
+            <div class="team-box">
+              <p class="team-line">当前团队：<b id="team-name">—</b></p>
+              <p class="team-line">团队邀请码：<code id="team-code" class="team-code">—</code>
+                <button type="button" class="ghost tiny" id="btn-copy-team-code">复制</button></p>
+            </div>
+            <div class="member-add">
+              <input id="new-team-name" type="text" placeholder="新团队名称（如 产品部）" maxlength="60" aria-label="新团队名称">
+              <button id="btn-create-team">+ 创建团队</button>
+            </div>
+            <p class="set-err" id="team-err" hidden></p>
           </section>
 
           <hr>
@@ -290,12 +304,62 @@
             <span class="login-label">口令</span>
             <input id="login-pass" type="password" autocomplete="current-password" placeholder="请输入口令" aria-label="口令">
           </label>
+          <!-- 【2026-10-27 多团队】团队码可选：不填就全局按名字找；重名时才需要填 -->
+          <label class="login-field">
+            <span class="login-label">团队码 <em class="login-opt">（可选）</em></span>
+            <input id="login-team" type="text" autocomplete="off" placeholder="如 WS-DEFAULT，名字重复时才需要" aria-label="团队码">
+          </label>
           <p class="login-error" id="login-error" role="alert"></p>
           <div class="login-actions">
             <button type="button" class="ghost" id="login-cancel">取消</button>
             <button type="submit" class="primary" id="login-submit">登录</button>
           </div>
+          <p class="login-switch">
+            还没有账号？<button type="button" class="link" id="btn-goto-register">用团队邀请码加入</button>
+          </p>
         </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- 【2026-10-27 多团队】自助加入团队（邀请码注册） -->
+  <div class="modal-overlay" id="register-modal" hidden>
+    <div class="modal login-card" role="dialog" aria-modal="true" aria-labelledby="register-title">
+      <div class="modal-head login-head">
+        <h2 id="register-title">加入团队</h2>
+        <button class="modal-close" id="register-close" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body login-body">
+        <p class="login-sub">向团队管理员要一个<span class="em">团队邀请码</span>，填进来就能创建自己的账号。<br>团队之间数据完全隔离——你看不到别的团队的日程。</p>
+        <form id="register-form" autocomplete="on">
+          <label class="login-field">
+            <span class="login-label">团队邀请码</span>
+            <input id="reg-code" type="text" autocomplete="off" placeholder="如 WS-8F3K2P" aria-label="团队邀请码">
+          </label>
+          <label class="login-field">
+            <span class="login-label">你的名字</span>
+            <input id="reg-name" type="text" autocomplete="username" maxlength="20" placeholder="团队内不能重名" aria-label="成员名称">
+          </label>
+          <label class="login-field">
+            <span class="login-label">设置口令</span>
+            <input id="reg-pass" type="password" autocomplete="new-password" placeholder="至少 6 位" aria-label="口令">
+          </label>
+          <label class="login-field">
+            <span class="login-label">确认口令</span>
+            <input id="reg-pass2" type="password" autocomplete="new-password" placeholder="再输一次" aria-label="确认口令">
+          </label>
+          <p class="login-error" id="register-error" role="alert"></p>
+          <div class="login-actions">
+            <button type="button" class="ghost" id="register-cancel">取消</button>
+            <button type="submit" class="primary" id="register-submit">加入</button>
+          </div>
+          <p class="login-switch">
+            已有账号？<button type="button" class="link" id="btn-goto-login">返回登录</button>
+          </p>
+        </form>
+      </div>
+    </div>
+  </div>
       </div>
     </div>
   </div>

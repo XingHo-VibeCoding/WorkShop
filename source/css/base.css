@@ -363,29 +363,29 @@ body { display: flex; flex-direction: column; height: 100vh; }
 
 /* 阶段二 P8：登录弹窗加大（用户反馈偏窄偏矮） */
 /* 阶段二 P8：登录弹窗（独立样式，不影响其它弹窗） */
-#login-modal .modal.login-card {
+:is(#login-modal, #register-modal) .modal.login-card {
   width: 384px;
   max-width: calc(100vw - 32px);
   border-radius: 14px;
   padding: 0;
   overflow: hidden;
 }
-#login-modal .login-head {
+:is(#login-modal, #register-modal) .login-head {
   padding: 22px 24px 0;
   border-bottom: none;
   cursor: default;        /* 登录框不拖动，去掉 grab 手型 */
   user-select: none;
 }
-#login-modal .login-head h2 { font-size: 18px; font-weight: 700; }
-#login-modal .login-body { padding: 6px 24px 24px; }
-#login-modal .login-sub {
+:is(#login-modal, #register-modal) .login-head h2 { font-size: 18px; font-weight: 700; }
+:is(#login-modal, #register-modal) .login-body { padding: 6px 24px 24px; }
+:is(#login-modal, #register-modal) .login-sub {
   margin: 6px 0 22px;
   font-size: 13px; line-height: 1.55; color: var(--ink-soft);
 }
-#login-modal .login-form { display: flex; flex-direction: column; gap: 16px; }
-#login-modal .login-field { display: flex; flex-direction: column; gap: 7px; }
-#login-modal .login-label { font-size: 13px; font-weight: 600; color: var(--ink); }
-#login-modal .login-field input {
+:is(#login-modal, #register-modal) .login-form { display: flex; flex-direction: column; gap: 16px; }
+:is(#login-modal, #register-modal) .login-field { display: flex; flex-direction: column; gap: 7px; }
+:is(#login-modal, #register-modal) .login-label { font-size: 13px; font-weight: 600; color: var(--ink); }
+:is(#login-modal, #register-modal) .login-field input {
   width: 100%;
   padding: 11px 13px;
   font-size: 15px;
@@ -395,37 +395,66 @@ body { display: flex; flex-direction: column; height: 100vh; }
   border-radius: 9px;
   transition: border-color .15s, box-shadow .15s;
 }
-#login-modal .login-field input::placeholder { color: #aab0b8; }
-#login-modal .login-field input:focus {
+:is(#login-modal, #register-modal) .login-field input::placeholder { color: #aab0b8; }
+:is(#login-modal, #register-modal) .login-field input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(29,78,216,.15);
   outline: none;
 }
-#login-modal .login-error {
+:is(#login-modal, #register-modal) .login-error {
   margin: -2px 0 0;
   min-height: 18px;
   font-size: 13px; line-height: 1.4;
   color: var(--warn);
 }
-#login-modal .login-error:empty { min-height: 0; margin: 0; }
-#login-modal .login-actions {
+:is(#login-modal, #register-modal) .login-error:empty { min-height: 0; margin: 0; }
+:is(#login-modal, #register-modal) .login-actions {
   display: flex; justify-content: flex-end; gap: 10px;
   margin-top: 6px;
 }
-#login-modal .login-actions button {
+:is(#login-modal, #register-modal) .login-actions button {
   padding: 10px 22px; font-size: 14px; border-radius: 9px; cursor: pointer;
 }
-#login-modal .login-actions .ghost {
+:is(#login-modal, #register-modal) .login-actions .ghost {
   background: transparent;
   border: 1px solid var(--line);
   color: var(--ink-soft);
 }
-#login-modal .login-actions .ghost:hover { background: var(--bg); }
-#login-modal .login-actions .primary {
+:is(#login-modal, #register-modal) .login-actions .ghost:hover { background: var(--bg); }
+:is(#login-modal, #register-modal) .login-actions .primary {
   background: var(--accent); border: 1px solid var(--accent); color: #fff; font-weight: 600;
 }
-#login-modal .login-actions .primary:hover:not(:disabled) { background: #1746b8; border-color: #1746b8; }
-#login-modal .login-actions .primary:disabled { opacity: .6; cursor: default; }
+:is(#login-modal, #register-modal) .login-actions .primary:hover:not(:disabled) { background: #1746b8; border-color: #1746b8; }
+:is(#login-modal, #register-modal) .login-actions .primary:disabled { opacity: .6; cursor: default; }
+
+/* ===== 【2026-10-27 多团队】登录/注册新增元素 ===== */
+:is(#login-modal, #register-modal) .login-opt { font-style: normal; font-weight: 400; color: var(--ink-soft); }
+:is(#login-modal, #register-modal) .login-sub .em { font-style: normal; font-weight: 700; color: var(--ink); }
+:is(#login-modal, #register-modal) .login-switch {
+  margin: 12px 0 0; font-size: 12.5px; color: var(--ink-soft); text-align: center;
+}
+:is(#login-modal, #register-modal) .login-switch .link {
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: var(--accent, #2f6fed); font-size: 12.5px; text-decoration: underline;
+}
+:is(#login-modal, #register-modal) .login-switch .link:hover { opacity: .8; }
+
+/* 顶栏身份区里的团队名（弱化展示，不抢人名的位置） */
+.id-chip .id-team {
+  margin-left: 6px; padding: 1px 6px; border-radius: 999px;
+  background: rgba(47, 111, 237, .12); color: var(--accent, #2f6fed);
+  font-size: 11px; font-weight: 600;
+}
+
+/* 管理员「团队」区块 */
+.team-box { margin: 6px 0 10px; }
+.team-line { margin: 2px 0; font-size: 13px; color: var(--ink); }
+.team-code {
+  display: inline-block; padding: 1px 6px; border-radius: 4px;
+  background: var(--bg, #f4f6f9); font-family: ui-monospace, Consolas, monospace; font-size: 12.5px;
+}
+button.tiny { padding: 1px 8px; font-size: 11.5px; margin-left: 6px; }
+
 .modal { width: 480px; max-width: 100%; max-height: 86vh; background: var(--panel); border-radius: 12px; box-shadow: 0 12px 40px rgba(16,24,40,.25); display: flex; flex-direction: column; overflow: hidden; }
 .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--line); cursor: grab; user-select: none; touch-action: none; }
 .modal-head:active { cursor: grabbing; }

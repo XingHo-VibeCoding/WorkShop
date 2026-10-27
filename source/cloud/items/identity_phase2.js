@@ -85,7 +85,8 @@ function hmac(payloadB64) {
 
 /**
  * 签发成员令牌。格式：base64url(payload).hex(hmac)
- * payload = { mid, name, role, exp }（★ 未加密，别放敏感信息；前端只是原样带回）
+ * payload = { mid, name, role, tid, exp }（★ 未加密，别放敏感信息；前端只是原样带回）
+ * 【2026-10-27 多团队】新增 tid（团队 id）。令牌只是"提示"，服务端仍以库里的 team_id 为准。
  */
 function signToken(member) {
   // ★ Fail-closed：没配密钥就拒绝签发，绝不允许"没配置 = 人人可登录"
@@ -93,10 +94,14 @@ function signToken(member) {
   const id = Number(member && (member.id != null ? member.id : member.member_id));
   if (!Number.isInteger(id) || id <= 0) throw authError(500, MSG.TOKEN_INVALID, 'signToken: bad member id');
 
+  const tidRaw = member && (member.team_id != null ? member.team_id : member.teamId);
+  const tid = Number(tidRaw);
   const payload = {
     mid: id,
     name: String((member && (member.display_name || member.displayName || member.name)) || ''),
     role: String((member && member.role) || 'member'),
+    // 老成员若尚未回填 team_id 则为 null，服务端会按 mid 回查补齐（见 index.js resolveActor）
+    tid: Number.isInteger(tid) && tid > 0 ? tid : null,
     exp: Math.floor(Date.now() / 1000) + TOKEN_TTL_DAYS * 24 * 3600,
   };
   const payloadB64 = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
@@ -134,6 +139,10 @@ function verifyToken(token) {
   if (!payload.exp || payload.exp * 1000 <= Date.now()) {
     throw authError(401, MSG.TOKEN_EXPIRED, 'verifyToken: expired');
   }
+  // 【2026-10-27 多团队】tid 合法化：老令牌没有这个字段 → 归一为 null，
+  // 由调用方按 mid 回查库补齐（绝不因为"令牌里没团队"就放行全库）。
+  const tid = Number(payload.tid);
+  payload.tid = Number.isInteger(tid) && tid > 0 ? tid : null;
   return payload;
 }
 

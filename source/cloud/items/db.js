@@ -39,7 +39,21 @@ const DEVICE_ID = 'workshop-items-' + Math.random().toString(36).slice(2, 10);
 //   兼容性：只追加、不删旧列 ⇒ 老字段一个不少，v1.0 前端不受影响。
 const COLUMNS =
   'id,title,type,table_kind,start_time,end_time,week,attendees,venue,equipment,note,source,status,owner_key,idempotency_key,created_at,updated_at,' +
-  'owner_member_id,created_by,updated_by,border_color,meeting_no,meeting_url';
+  'owner_member_id,created_by,updated_by,border_color,meeting_no,meeting_url,team_id';
+
+// —— 【2026-10-27 多团队隔离】团队维度的硬约束 ——
+// 为什么做成「缺参数就抛错」而不是「没传就不过滤」：
+//   后者只要有一处漏传，接口就会静默返回【全库】数据——跨团队泄露，而且毫无报错，最难发现。
+//   现在漏传立刻 500，测试期就炸出来，不可能带着这个洞上线。
+function requireTeamId(teamId, where) {
+  const n = Number(teamId);
+  if (!Number.isInteger(n) || n <= 0) {
+    const e = new Error(`[隔离] ${where}: 缺少有效 teamId（收到 ${JSON.stringify(teamId)}）`);
+    e.code = 500;
+    throw e;
+  }
+  return n;
+}
 
 // —— Bearer 解析：优先 API Key（service_role），兜底匿名登录并缓存 ——
 let _token = null;
@@ -72,9 +86,11 @@ async function getBearer() {
 }
 
 // 把可选过滤参数拼成 PostgREST 查询串（全部由网关参数化，无手动拼接 SQL）
-function buildQueryString(q) {
+// 【2026-10-27】teamId 必传：团队过滤条件不可省略，见 requireTeamId 的注释。
+function buildQueryString(q, teamId) {
   const p = new URLSearchParams();
   p.set('select', COLUMNS);
+  p.set('team_id', `eq.${requireTeamId(teamId, 'queryItems')}`);   // ★ 隔离第一道
   if (q.table && q.table !== 'all') p.set('table_kind', `eq.${q.table}`);
   if (q.ownerKey) p.set('owner_key', `eq.${q.ownerKey}`);
   if (q.type) p.set('type', `eq.${q.type}`);
@@ -130,10 +146,10 @@ function toItem(r) {
   };
 }
 
-// GET /api/items —— 列表读取（核心"查数据库"）
-async function queryItems(q) {
+// GET /api/items —— 列表读取（核心"查数据库"）。teamId 必传，团队过滤在 buildQueryString 里
+async function queryItems(q, teamId) {
   const token = await getBearer();
-  const url = `${GATEWAY}/v1/rdb/rest/items?${buildQueryString(q)}`;
+  const url = `${GATEWAY}/v1/rdb/rest/items?${buildQueryString(q, teamId)}`;
   const res = await fetch(url, {
     method: 'GET',
     headers: {
@@ -164,10 +180,11 @@ async function queryItems(q) {
 
 // POST /api/items 第 3 步 —— 内容去重查（同 标题+时间+归属+表+类型 视为重复）
 // 返回 true 表示已存在重复项；去重查询本身失败（非 ok）时降级为 false（放行到写入，由唯一约束兜底）
-async function findDuplicate({ title, table, type, start, end, ownerKey }) {
+async function findDuplicate({ title, table, type, start, end, ownerKey, teamId }) {
   const token = await getBearer();
   const dupQ = new URLSearchParams();
   dupQ.set('select', 'id');
+  dupQ.set('team_id', `eq.${requireTeamId(teamId, 'findDuplicate')}`);   // ★ 去重只在团队内判
   dupQ.set('title', `eq.${title}`);
   dupQ.set('table_kind', `eq.${table}`);
   dupQ.set('type', `eq.${type}`);
@@ -226,11 +243,13 @@ async function insertItem(row) {
 // —— 【Day 22】PATCH /api/items/:id 第 1 步 —— 按 id 查单条 ——
 // 用途有二：① 判断这条记录存不存在（不存在要回 404，不能稀里糊涂返回 ok）；
 //          ② PATCH 是"部分更新"，只改开始时间时要拿库里的结束时间来校验区间，否则会改出 end < start。
-async function findItemById(id) {
+async function findItemById(id, teamId) {
+  const tid = requireTeamId(teamId, 'findItemById');
   const token = await getBearer();
   const p = new URLSearchParams();
   p.set('select', COLUMNS);
   p.set('id', `eq.${id}`);
+  p.set('team_id', `eq.${tid}`);      // ★ 别的团队的 id 一律查不到 → 控制器翻成 404（不泄露"存在但无权"）
   const res = await fetch(`${GATEWAY}/v1/rdb/rest/items?${p.toString()}`, {
     method: 'GET',
     headers: {
@@ -258,10 +277,14 @@ async function findItemById(id) {
 //   让"版本比对"发生在数据库内部（原子），彻底堵住「读后比对」的竞态窗口——
 //   别人在我们读取之后、写入之前改了同一行，本条件命中 0 行 → 控制器返回 409 冲突。
 // 返回：{ item } 成功 / { notFound: true } id 不存在 / { concurrent: true } 版本不符（被他人抢先改） / { error }
-async function updateItem(id, patch, baseUpdatedAt) {
+async function updateItem(id, patch, baseUpdatedAt, teamId) {
+  const tid = requireTeamId(teamId, 'updateItem');
+  // ★ 隔离防篡改：patch 里绝不允许出现 team_id —— 否则一次 PATCH 就能把日程"搬到"别的团队
+  if (patch && Object.prototype.hasOwnProperty.call(patch, 'team_id')) delete patch.team_id;
   const token = await getBearer();
   const q = new URLSearchParams();
   q.set('id', `eq.${encodeURIComponent(id)}`);
+  q.set('team_id', `eq.${tid}`);   // ★ 隔离：跨团队的 id 命中 0 行 → notFound，改不动别人
   if (baseUpdatedAt) q.set('updated_at', `eq.${String(baseUpdatedAt)}`);   // ★ P9 并发条件（原子）
   const updRes = await fetch(`${GATEWAY}/v1/rdb/rest/items?${q.toString()}`, {
     method: 'PATCH',
@@ -304,9 +327,11 @@ async function updateItem(id, patch, baseUpdatedAt) {
 // ★ 带 `Prefer: return=representation` 让网关把被删的那行回传 —— 删完能留下"刚才删的是什么"的快照，
 //    这是硬删除唯一的一点可追溯性（真要能找回，得靠软删除 is_deleted，属今天的余力加练）。
 // 返回：{ deleted } 成功 / { notFound: true } 该 id 不存在 / { error } 失败
-async function deleteItem(id) {
+async function deleteItem(id, teamId) {
+  const tid = requireTeamId(teamId, 'deleteItem');
   const token = await getBearer();
-  const delRes = await fetch(`${GATEWAY}/v1/rdb/rest/items?id=eq.${encodeURIComponent(id)}`, {
+  // ★ 双重过滤：id + team_id。只有 id 的删除在多团队下等于「知道 id 就能删别人的日程」。
+  const delRes = await fetch(`${GATEWAY}/v1/rdb/rest/items?id=eq.${encodeURIComponent(id)}&team_id=eq.${tid}`, {
     method: 'DELETE',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -335,14 +360,19 @@ async function deleteItem(id) {
 // 本函数只负责"把这一行的 salt 和哈希取回来"，**不做任何比对**（比对在 identity_phase2 里），
 // 保持分层：数据访问层碰库、身份模块碰密码学，两边都能单独测。
 // ⚠️ 安全：identity_key / salt 是凭据，**绝不能出现在任何对外响应里**，只在本进程内流转。
-async function findMemberByName(displayName) {
+// 【2026-10-27 多团队】teamId 可选：
+//   传了 → 只在该团队内找（登录填了团队码，或注册时已定团队）
+//   不传 → 全局找。返回【全部命中行】，因为要能判断"重名跨团队"并让用户补团队码。
+async function findMemberByName(displayName, teamId = null) {
   const name = String(displayName || '').trim();
   if (!name) return null;
   const token = await getBearer();
   const p = new URLSearchParams();
-  p.set('select', 'id,display_name,identity_key,auth_kind,role,border_color,meeting_no,meeting_url,salt,note');
+  p.set('select', 'id,display_name,identity_key,auth_kind,role,border_color,meeting_no,meeting_url,salt,note,team_id');
   p.set('display_name', `eq.${name}`);
   p.set('auth_kind', 'eq.passcode');     // 只认口令成员；微信/匿名身份本期不启用
+  if (teamId != null) p.set('team_id', `eq.${requireTeamId(teamId, 'findMemberByName')}`);
+  p.set('order', 'id.asc');
   const res = await fetch(`${GATEWAY}/v1/rdb/rest/members_phase2?${p.toString()}`, {
     method: 'GET',
     headers: {
@@ -364,15 +394,16 @@ async function findMemberByName(displayName) {
     throw new Error(`查询成员失败：${msg}`);
   }
   const rows = Array.isArray(json) ? json : (json && json.data) || [];
-  return rows.length ? rows[0] : null;   // 查不到返回 null，由调用方统一按"口令无效"处理（不泄露是否存在该成员）
+  return rows;   // ★ 返回数组（可能 0/1/多行），由控制器决定"无此人 / 正常 / 重名要团队码"
 }
 
 // —— 【阶段二 P9】成员列表（供前端"归属给谁"下拉；不含任何凭据）——
-async function listMembers() {
+async function listMembers(teamId) {
   const token = await getBearer();
   const p = new URLSearchParams();
   p.set('select', 'id,display_name,role,border_color,meeting_no,meeting_url');
   p.set('auth_kind', 'eq.passcode');
+  p.set('team_id', `eq.${requireTeamId(teamId, 'listMembers')}`);   // ★ 只列本团队；跨团队名单不可见
   p.set('order', 'id.asc');
   const res = await fetch(`${GATEWAY}/v1/rdb/rest/members_phase2?${p.toString()}`, {
     method: 'GET',
@@ -403,12 +434,13 @@ async function listMembers() {
 }
 
 // —— 【阶段二 P9】按 id 查单个成员（校验"给他人放"目标真实存在，并取库里的外框色，防前端冒充）——
+// 【2026-10-27】多返回 teamId：令牌里没带 tid 的老令牌要靠它补齐；也用于"目标是否同团队"的判定。
 async function findMemberById(id) {
   const n = Number(id);
   if (!Number.isInteger(n) || n <= 0) return null;
   const token = await getBearer();
   const p = new URLSearchParams();
-  p.set('select', 'id,display_name,role,border_color');
+  p.set('select', 'id,display_name,role,border_color,team_id');
   p.set('id', `eq.${n}`);
   const res = await fetch(`${GATEWAY}/v1/rdb/rest/members_phase2?${p.toString()}`, {
     method: 'GET',
@@ -429,13 +461,14 @@ async function findMemberById(id) {
   }
   const rows = Array.isArray(json) ? json : (json && json.data) || [];
   return rows.length
-    ? { id: rows[0].id, displayName: rows[0].display_name || '', role: rows[0].role || 'member', borderColor: rows[0].border_color || null }
+    ? { id: rows[0].id, displayName: rows[0].display_name || '', role: rows[0].role || 'member',
+        borderColor: rows[0].border_color || null, teamId: rows[0].team_id != null ? Number(rows[0].team_id) : null }
     : null;
 }
 
 // —— 【阶段二 P9】写操作留痕（audit_phase2，只追加）——
 // 失败只记日志、不阻断主流程（留痕是辅助，不能因为留痕挂了就让建/改/删也失败）。
-async function insertAudit({ itemId, actorId, action, targetId, detail }) {
+async function insertAudit({ itemId, actorId, action, targetId, detail, teamId }) {
   const token = await getBearer();
   const row = {
     item_id: itemId != null ? Number(itemId) : null,
@@ -443,6 +476,8 @@ async function insertAudit({ itemId, actorId, action, targetId, detail }) {
     action: String(action || 'create'),
     target_id: targetId != null ? Number(targetId) : null,
     detail: detail != null ? String(detail) : null,
+    // 【2026-10-27】留痕也带团队，便于按团队审计；拿不到 teamId 时留空（不阻断主流程）
+    team_id: (teamId != null && Number.isInteger(Number(teamId)) && Number(teamId) > 0) ? Number(teamId) : null,
   };
   try {
     const res = await fetch(`${GATEWAY}/v1/rdb/rest/audit_phase2`, {
@@ -496,13 +531,14 @@ async function touchMember(mid) {
 // —— 【阶段二 在线人数】统计窗口内心跳过的成员数（2026-10-18）——
 // 只有登录成员会记心跳（匿名无令牌不记）→ 统计口径 = 登录成员中的在线数。
 // minutes: 判定窗口（分钟），默认 2。成员量小（个位数），直接数行，不引入 count 聚合头。
-async function countOnline(minutes = 2) {
+async function countOnline(minutes = 2, teamId) {
   const win = Math.max(1, Number(minutes) || 2);
   const since = new Date(Date.now() - win * 60 * 1000).toISOString();
   const token = await getBearer();
   const p = new URLSearchParams();
   p.set('select', 'id');
   p.set('last_seen_at', `gte.${since}`);
+  p.set('team_id', `eq.${requireTeamId(teamId, 'countOnline')}`);   // ★ 在线人数按团队统计（别人团队的人不该算进你的数）
   const res = await fetch(`${GATEWAY}/v1/rdb/rest/members_phase2?${p.toString()}`, {
     method: 'GET',
     headers: {
@@ -530,12 +566,14 @@ async function countOnline(minutes = 2) {
 // —— 【阶段二 管理员 UI】改他人角色（2026-10-18，seam C 落地）——
 // ★ 权限校验（仅 admin、禁改自己）在 index.js 的 setRole 内，本函数只做数据写入。
 // 返回：{ member: {id, displayName, role} } 成功 / { notFound: true } id 不存在 / { error } 失败
-async function updateMemberRole(mid, role) {
+async function updateMemberRole(mid, role, teamId) {
   const n = Number(mid);
   if (!Number.isInteger(n) || n <= 0) return { notFound: true };
+  const tid = requireTeamId(teamId, 'updateMemberRole');
   const token = await getBearer();
   const q = new URLSearchParams();
   q.set('id', `eq.${n}`);   // ★ 同 Day 22 教训：不带条件 = 整表改角色，灾难
+  q.set('team_id', `eq.${tid}`);   // ★ 隔离：管理员只能改【本团队】成员，跨团队 id 命中 0 行 → notFound
   const res = await fetch(`${GATEWAY}/v1/rdb/rest/members_phase2?${q.toString()}`, {
     method: 'PATCH',
     headers: {
@@ -647,9 +685,10 @@ async function updateMemberPasscode(mid, identityKey, salt) {
 // display_name 无唯一约束（重名检查在 index.js 的 addMember 层做，返 409）；
 // identity_key 有唯一索引 —— 每次新盐 → 新哈希，不会撞。
 // 返回：{ member: {id, displayName, role} } 成功 / { error } 失败
-async function insertMemberWithAuth({ displayName, role, identityKey, salt }) {
+async function insertMemberWithAuth({ displayName, role, identityKey, salt, teamId }) {
   const name = String(displayName || '').trim();
   if (!name) return { error: { code: 400, message: '成员名称不能为空' } };
+  const tid = requireTeamId(teamId, 'insertMemberWithAuth');
   const token = await getBearer();
   const row = {
     display_name: name,
@@ -657,6 +696,7 @@ async function insertMemberWithAuth({ displayName, role, identityKey, salt }) {
     auth_kind: 'passcode',
     identity_key: String(identityKey),
     salt: String(salt),
+    team_id: tid,        // ★ 新成员永远落在操作者所属团队（不能凭空建到别人团队）
   };
   const res = await fetch(`${GATEWAY}/v1/rdb/rest/members_phase2`, {
     method: 'POST',
@@ -690,6 +730,123 @@ async function insertMemberWithAuth({ displayName, role, identityKey, salt }) {
   };
 }
 
+// ============ 【2026-10-27 多团队隔离】团队表读写 ============
+
+// 按团队码查团队（登录定位 / 注册加入都用它）。团队码大小写不敏感：统一转大写再查。
+async function findTeamByJoinCode(joinCode) {
+  const code = String(joinCode || '').trim().toUpperCase();
+  if (!code) return null;
+  const token = await getBearer();
+  const p = new URLSearchParams();
+  p.set('select', 'id,name,join_code');
+  p.set('join_code', `eq.${code}`);
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/teams_phase2?${p.toString()}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}`, 'Accept': 'application/json', 'Accept-Profile': SCHEMA, 'Content-Profile': SCHEMA },
+  });
+  const text = await res.text();
+  let json;
+  try { json = JSON.parse(text); } catch (e) { throw new Error(`查询团队返回非 JSON（HTTP ${res.status}）`); }
+  if (!res.ok) {
+    const msg = (json && (json.message || json.error || json.error_description || json.hint)) || `HTTP ${res.status}`;
+    throw new Error(`查询团队失败：${msg}`);
+  }
+  const rows = Array.isArray(json) ? json : (json && json.data) || [];
+  return rows.length ? { id: rows[0].id, name: rows[0].name || '', joinCode: rows[0].join_code || '' } : null;
+}
+
+async function findTeamById(id) {
+  const n = Number(id);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  const token = await getBearer();
+  const p = new URLSearchParams();
+  p.set('select', 'id,name,join_code');
+  p.set('id', `eq.${n}`);
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/teams_phase2?${p.toString()}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}`, 'Accept': 'application/json', 'Accept-Profile': SCHEMA, 'Content-Profile': SCHEMA },
+  });
+  const text = await res.text();
+  let json;
+  try { json = JSON.parse(text); } catch (e) { throw new Error(`查询团队返回非 JSON（HTTP ${res.status}）`); }
+  if (!res.ok) {
+    const msg = (json && (json.message || json.error || json.error_description || json.hint)) || `HTTP ${res.status}`;
+    throw new Error(`查询团队失败：${msg}`);
+  }
+  const rows = Array.isArray(json) ? json : (json && json.data) || [];
+  return rows.length ? { id: rows[0].id, name: rows[0].name || '', joinCode: rows[0].join_code || '' } : null;
+}
+
+// 建团队。失败若是团队码撞车（23505）→ 返回 { conflict: true }，由控制器提示换一个码。
+async function createTeam({ name, joinCode, note }) {
+  const token = await getBearer();
+  const row = {
+    name: String(name || '').trim(),
+    join_code: String(joinCode || '').trim().toUpperCase(),
+    note: note != null ? String(note) : null,
+  };
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/teams_phase2`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Accept-Profile': SCHEMA,
+      'Content-Profile': SCHEMA,
+      'Prefer': 'return=representation',
+    },
+    body: JSON.stringify([row]),
+  });
+  const text = await res.text();
+  let json;
+  try { json = JSON.parse(text); } catch (e) { return { error: { code: 500, message: `建团队返回非 JSON（HTTP ${res.status}）` } }; }
+  if (!res.ok) {
+    const msg = (json && (json.message || json.error || json.error_description || json.hint)) || `HTTP ${res.status}`;
+    const isDup = res.status === 409 || (json && (json.code === '23505' || /duplicate key/i.test(msg)));
+    if (isDup) return { conflict: true };
+    return { error: { code: res.status, message: `建团队失败：${msg}` } };
+  }
+  const rows = Array.isArray(json) ? json : (json && json.data) || [];
+  if (!rows.length) return { error: { code: 500, message: '建团队未返回创建结果' } };
+  return { team: { id: rows[0].id, name: rows[0].name || '', joinCode: rows[0].join_code || '' } };
+}
+
+// 列出全部团队（仅平台管理员用；不含成员凭据）
+async function listTeams() {
+  const token = await getBearer();
+  const p = new URLSearchParams();
+  p.set('select', 'id,name,join_code,created_at');
+  p.set('order', 'id.asc');
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/teams_phase2?${p.toString()}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}`, 'Accept': 'application/json', 'Accept-Profile': SCHEMA, 'Content-Profile': SCHEMA },
+  });
+  const text = await res.text();
+  let json;
+  try { json = JSON.parse(text); } catch (e) { throw new Error(`查询团队列表返回非 JSON（HTTP ${res.status}）`); }
+  if (!res.ok) {
+    const msg = (json && (json.message || json.error || json.error_description || json.hint)) || `HTTP ${res.status}`;
+    throw new Error(`查询团队列表失败：${msg}`);
+  }
+  const rows = Array.isArray(json) ? json : (json && json.data) || [];
+  return rows.map(r => ({ id: r.id, name: r.name || '', joinCode: r.join_code || '', createdAt: r.created_at }));
+}
+
+// 统计某团队的成员数（建团队后回显用；也用于"这个团队有没有人"的判断）
+async function countTeamMembers(teamId) {
+  const tid = requireTeamId(teamId, 'countTeamMembers');
+  const token = await getBearer();
+  const p = new URLSearchParams();
+  p.set('select', 'id');
+  p.set('team_id', `eq.${tid}`);
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/members_phase2?${p.toString()}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}`, 'Accept': 'application/json', 'Accept-Profile': SCHEMA, 'Content-Profile': SCHEMA },
+  });
+  if (!res.ok) return 0;
+  const rows = await res.json().catch(() => []);
+  return Array.isArray(rows) ? rows.length : 0;
+}
+
 module.exports = {
   queryItems,
   findDuplicate,
@@ -707,8 +864,15 @@ module.exports = {
   touchMember,
   countOnline,
   updateMemberRole,
-  // 【阶段二 Step5 口令体系 2026-10-23】
+  // 【阶段二 Step5 口令体系 2026-07-17】
   findMemberCredentialsById,
   updateMemberPasscode,
   insertMemberWithAuth,
+  // 【2026-10-27 多团队隔离】
+  findTeamByJoinCode,
+  findTeamById,
+  createTeam,
+  listTeams,
+  countTeamMembers,
+  requireTeamId,
 };

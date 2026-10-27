@@ -126,6 +126,10 @@ const MEMBER_ROLES = ['member', 'readonly', 'admin'];
 // 【阶段二 Step5】添加成员的 UI 只给这两档；admin 任命刻意不走 UI（初期只此一条通道＝控制台 SQL，用户 10-22 拍板）
 const ADD_MEMBER_ROLES = ['member', 'readonly'];
 
+// 【2026-10-27 多团队隔离】默认团队码：现有数据全部归入它，匿名只读也落在它上面。
+// 与 db/schema_phase2.sql 里 INSERT 的 join_code 必须逐字一致（含大小写）。
+const DEFAULT_TEAM_CODE = 'WS-DEFAULT';
+
 // 时间规整：YYYY-MM-DD HH:mm(:ss) → YYYY-MM-DD HH:mm:ss（补秒，便于与库内值精确比对去重）
 // 【Day 24】解析放宽（契约同步）：前端已改成拨轮选时间、不再手打，但脚本 / 将来的导入接口仍会送各种写法，
 //   所以这里接受：日期用 - 或 / 分隔、日期与时间之间空格或 T、月/日/时/分可不补前导零。
@@ -166,10 +170,59 @@ function resolveLogin(event) {
   try {
     const t = identity.readTokenFrom(event);
     if (!t) return null;
-    return identity.verifyToken(t); // { mid, name, role, exp }
+    return identity.verifyToken(t); // { mid, name, role, tid, exp }
   } catch (_) {
     return null;
   }
+}
+
+/* ============ 【2026-10-27 多团队隔离】身份 → 团队 的解析 ============
+   两条硬规则：
+     1) 团队归属以【库里的 team_id】为准，不完全信任令牌里的 tid。
+        （令牌只是加速提示；角色/团队都是服务端状态，改了就应立刻生效）
+     2) 解析不出团队 → 视为未登录（fail-closed）。绝不允许"拿不到团队就查全库"。 */
+
+// 默认团队 id 缓存（匿名只读用）。查不到时返回 null，由调用方拒绝。
+let _defaultTeamId = null;
+async function resolveDefaultTeamId() {
+  if (_defaultTeamId) return _defaultTeamId;
+  const t = await db.findTeamByJoinCode(DEFAULT_TEAM_CODE);
+  _defaultTeamId = t ? t.id : null;
+  return _defaultTeamId;
+}
+
+// 解出当前操作者（含团队）。无令牌/坏令牌/查不到团队 → null。
+async function resolveActor(event) {
+  const t = resolveLogin(event);
+  if (!t) return null;
+  let teamId = t.tid;
+  if (!teamId) {
+    // 老令牌（2026-10-27 之前签发，payload 里没有 tid）→ 按 mid 回查库补齐。
+    // 这样上线时不用逼全员重新登录。
+    try {
+      const m = await db.findMemberById(t.mid);
+      teamId = m && m.teamId ? m.teamId : null;
+    } catch (_) { teamId = null; }
+  }
+  if (!teamId) return null;   // 查不到团队 = 身份不完整 → 当未登录处理
+  return { mid: t.mid, name: t.name, role: t.role, teamId };
+}
+
+// 读操作（列表/成员/心跳）：登录了就用自己的团队，未登录用默认团队。
+async function resolveReadScope(event) {
+  const actor = await resolveActor(event);
+  if (actor) return { actor, teamId: actor.teamId, anonymous: false };
+  const tid = await resolveDefaultTeamId();
+  return { actor: null, teamId: tid, anonymous: true };
+}
+
+// 写操作统一闸门：必须登录 + 必须有团队（2026-10-27 起匿名写入关闭，即修掉 seam A）
+async function requireWriter(event) {
+  const actor = await resolveActor(event);
+  if (!actor) {
+    return { error: { code: 401, message: '请先登录后再修改日程' } };
+  }
+  return { actor };
 }
 
 // —— 新建事项（POST /api/items，Day 18 逻辑，Day 19 改为调 DAL）——
@@ -236,10 +289,16 @@ async function createItem(event) {
   }
   // 【阶段二 P9】权限判定 + 归属写入。
   // owner_member_id / created_by 必须由后端从令牌解（不可信前端，防伪造归属）。
-  const _lm = resolveLogin(event);
+  // 【2026-10-27 多团队】写入必须登录：匿名写入已关闭（原 seam A 遗留风险），
+  //   团队由服务端解出，不接受前端传 teamId（否则等于让客户端自己选数据边界）。
+  const _w = await requireWriter(event);
+  if (_w.error) return { ok: false, data: null, error: _w.error };
+  const _lm = _w.actor;
+  const _teamId = _lm.teamId;
+  row.team_id = _teamId;
   let _placeForTarget = null;   // 给他人放时的目标成员 id（用于写留痕）
   let _placeForName = '';
-  if (_lm) {
+  {
     const targetOwnerId = body.ownerMemberId != null && String(body.ownerMemberId).trim() !== ''
       ? Number(body.ownerMemberId) : null;
     const dec = acl.decideWrite(_lm, { op: 'create', targetOwnerId });
@@ -249,9 +308,9 @@ async function createItem(event) {
     row.owner_member_id = dec.ownerMemberId;
     row.created_by = _lm.mid;
     if (dec.placeFor) {
-      // ② 给他人放：校验目标成员真实存在，并取【库里】的外框色（防前端冒充颜色），随后写留痕
+      // ② 给他人放：校验目标成员真实存在【且同团队】，并取库里的外框色（防前端冒充颜色）
       const target = await db.findMemberById(dec.ownerMemberId);
-      if (!target) {
+      if (!target || target.teamId !== _teamId) {
         return { ok: false, data: null, error: { code: 400, message: '目标成员不存在，无法代为放置' } };
       }
       row.border_color = target.borderColor || null;
@@ -263,8 +322,8 @@ async function createItem(event) {
   }
   console.log('[POST /api/items] 校验通过，准备写入 row(脱敏):', JSON.stringify({ ...row, attendees: row.attendees ? '***' : row.attendees }));
 
-  // 3) 防重复提交：内容去重（调 DAL）
-  const isDup = await db.findDuplicate({ title, table, type, start, end, ownerKey });
+  // 3) 防重复提交：内容去重（调 DAL）—— 只在【本团队】内判重，别人团队有同名事项互不影响
+  const isDup = await db.findDuplicate({ title, table, type, start, end, ownerKey, teamId: _teamId });
   if (isDup) {
     console.log('[POST /api/items] 命中重复，拒绝写入');
     return { ok: false, data: null, error: { code: 409, message: '请勿重复提交：该事项已存在' } };
@@ -274,14 +333,13 @@ async function createItem(event) {
   const result = await db.insertItem(row);
   if (result.error) return { ok: false, data: null, error: result.error };
   // 【阶段二 P9】留痕：登录用户的所有创建都记一笔；代他人放置记为 place_for（A5②）
-  if (_lm) {
-    await db.insertAudit({
-      itemId: result.item.id, actorId: _lm.mid,
-      action: _placeForTarget != null ? 'place_for' : 'create',
-      targetId: _placeForTarget,
-      detail: _placeForTarget != null ? `代 ${_placeForName} 放置：${title}` : `创建：${title}`,
-    });
-  }
+  await db.insertAudit({
+    itemId: result.item.id, actorId: _lm.mid,
+    action: _placeForTarget != null ? 'place_for' : 'create',
+    targetId: _placeForTarget,
+    detail: _placeForTarget != null ? `代 ${_placeForName} 放置：${title}` : `创建：${title}`,
+    teamId: _teamId,
+  });
   console.log('[POST /api/items] 写入成功 id=', result.item.id, '耗时', Date.now() - t0, 'ms');
   return { ok: true, data: result.item, error: null };
 }
@@ -409,13 +467,20 @@ async function patchItem(event) {
     patch[PATCHABLE[k]] = v;
   }
 
+  // 【2026-10-27 多团队】先解身份（团队是读取前提）：匿名写入关闭，必须先登录。
+  // 顺序变了：原来先查 old 再判权限，现在先判身份——因为「查 old」本身就要团队条件。
+  const _w2 = await requireWriter(event);
+  if (_w2.error) return { ok: false, data: null, error: _w2.error };
+  const _lm2 = _w2.actor;
+  const _teamId2 = _lm2.teamId;
+
   // 4) 取原记录：① 判断存在与否 ② 只改一头时间时，要用库里另一头来校验区间
-  const old = await db.findItemById(id);
+  //    ★ 带 team_id：别的团队的事项一律查不到 → 404（不泄露"存在但无权"）
+  const old = await db.findItemById(id, _teamId2);
   if (!old) return { ok: false, data: null, error: { code: 404, message: `找不到该事项：id=${id}` } };
 
-  // 【阶段二 P9】权限判定：patch（已登录才判定；未登录放行 = 兼容 v1.0）
-  const _lm2 = resolveLogin(event);
-  if (_lm2) {
+  // 【阶段二 P9】权限判定
+  {
     const dec = acl.decideWrite(_lm2, { op: 'patch', item: old });
     if (!dec.ok) return { ok: false, data: null, error: { code: dec.code, message: dec.message } };
   }
@@ -433,21 +498,19 @@ async function patchItem(event) {
   // 开始时间变了 → ISO 周要跟着重算，否则这条事项会从它所属那一周里"消失"
   if (patch.start_time) patch.week = getISOWeek(patch.start_time) || old.week;
   // 【阶段二 P8】最后修改人：令牌存在时记 updated_by；缺省 NULL（兼容 v1.0）
-  if (_lm2) patch.updated_by = _lm2.mid;
+  patch.updated_by = _lm2.mid;
 
   // 【阶段二 P9】乐观并发：客户端带它加载时的 updatedAtRaw 作为版本号；
   // updateItem 会把它拼成 updated_at=eq.<旧值> 做「原子」条件更新 —— 被他人抢先改则 0 行命中 → 409。
   const baseUpdatedAt = body.baseUpdatedAt != null ? String(body.baseUpdatedAt) : null;
 
-  // 5) 写入（调 DAL）
-  const result = await db.updateItem(id, patch, baseUpdatedAt);
+  // 5) 写入（调 DAL）—— ★ 带 teamId，跨团队 id 命中 0 行
+  const result = await db.updateItem(id, patch, baseUpdatedAt, _teamId2);
   if (result.concurrent) return { ok: false, data: null, error: { code: 409, message: '数据已被他人修改，请刷新后再试（冲突）' } };
   if (result.notFound) return { ok: false, data: null, error: { code: 404, message: `找不到该事项：id=${id}` } };
   if (result.error) return { ok: false, data: null, error: result.error };
   // 【阶段二 P9】留痕：登录用户的修改记一笔
-  if (_lm2) {
-    await db.insertAudit({ itemId: Number(id), actorId: _lm2.mid, action: 'update', detail: `修改字段：${Object.keys(patch).join(',')}` });
-  }
+  await db.insertAudit({ itemId: Number(id), actorId: _lm2.mid, action: 'update', detail: `修改字段：${Object.keys(patch).join(',')}`, teamId: _teamId2 });
   console.log('[PATCH /api/items] 更新成功 id=', id, '改动字段', Object.keys(patch).join(','), '耗时', Date.now() - t0, 'ms');
   return { ok: true, data: result.item, error: null };
 }
@@ -477,25 +540,29 @@ async function removeItem(event) {
   if (parsed.error) return { ok: false, data: null, error: parsed.error };
   const id = parsed.id;
 
+  // 【2026-10-27 多团队】先解身份（匿名写入关闭），团队是查/删的前提
+  const _wD = await requireWriter(event);
+  if (_wD.error) return { ok: false, data: null, error: _wD.error };
+  const _lmD = _wD.actor;
+  const _teamIdD = _lmD.teamId;
+
   // 闸门D：先确认存在，不存在直接 404（顺带拿到快照，供闸门C 用）
-  const old = await db.findItemById(id);
+  //    ★ 带 team_id：别的团队的事项查不到 → 404
+  const old = await db.findItemById(id, _teamIdD);
   if (!old) return { ok: false, data: null, error: { code: 404, message: `找不到该事项：id=${id}（可能已被删除）` } };
 
-  // 【阶段二 P9】权限判定：delete（已登录才判定；未登录放行 = 兼容 v1.0）
-  const _lmD = resolveLogin(event);
-  if (_lmD) {
+  // 【阶段二 P9】权限判定
+  {
     const dec = acl.decideWrite(_lmD, { op: 'delete', item: old });
     if (!dec.ok) return { ok: false, data: null, error: { code: dec.code, message: dec.message } };
   }
 
-  const result = await db.deleteItem(id);
+  const result = await db.deleteItem(id, _teamIdD);
   if (result.notFound) return { ok: false, data: null, error: { code: 404, message: `找不到该事项：id=${id}（可能已被删除）` } };
   if (result.error) return { ok: false, data: null, error: result.error };
 
   // 【阶段二 P9】留痕：登录用户的删除记一笔（硬删除下，审计表是唯一的删除线索）
-  if (_lmD) {
-    await db.insertAudit({ itemId: Number(id), actorId: _lmD.mid, action: 'delete', detail: `删除：${old.title}` });
-  }
+  await db.insertAudit({ itemId: Number(id), actorId: _lmD.mid, action: 'delete', detail: `删除：${old.title}`, teamId: _teamIdD });
   console.log('[DELETE /api/items] 删除成功 id=', id, '原标题:', old.title, '耗时', Date.now() - t0, 'ms');
   // 闸门C：把被删掉的内容原样带回（硬删除下这是唯一的"后悔药线索"）
   return { ok: true, data: { id: Number(id), deleted: true, item: old }, error: null };
@@ -523,6 +590,19 @@ function publicMember(row) {
     meetingNo: row.meeting_no || null,
     meetingUrl: row.meeting_url || null,
     note: row.note || null,
+    // 【2026-10-27 多团队】前端要知道自己在哪个团队（顶栏显示团队名）
+    teamId: row.team_id != null ? Number(row.team_id) : null,
+  };
+}
+
+// 团队信息的对外形态：join_code 只给本团队管理员看（邀请码等于半个加入凭据，不公开）
+async function publicTeam(teamId, role) {
+  const t = await db.findTeamById(teamId);
+  if (!t) return null;
+  return {
+    id: t.id,
+    name: t.name,
+    joinCode: role === 'admin' ? t.joinCode : null,
   };
 }
 
@@ -532,15 +612,36 @@ async function authLogin(event) {
   const pick = (k) => (body[k] != null ? body[k] : q[k]);
   const name = String(pick('name') || '').trim();
   const passcode = String(pick('passcode') || '');
+  const teamCode = String(pick('teamCode') || '').trim();
 
   // ★ 只记名字，绝不记口令（哪怕脱敏也不行，口令没有"部分可看"这回事）
-  console.log('[POST /api/auth/login] 收到请求: name=', name || '(空)');
+  console.log('[POST /api/auth/login] 收到请求: name=', name || '(空)', ' teamCode=', teamCode ? '已填' : '(空)');
 
   if (!name) return { ok: false, data: null, error: { code: 400, message: '缺少必填字段：成员名称' } };
   if (!passcode) return { ok: false, data: null, error: { code: 400, message: '缺少必填字段：口令' } };
 
-  // 1) 按名字定位成员（db.js 只认 auth_kind='passcode' 的口令成员，查不到返回 null）
-  const member = await db.findMemberByName(name);
+  // 1) 定位成员。
+  // 【2026-10-27 多团队】团队码可选：
+  //   填了 → 只在该团队找（推荐，最准）
+  //   没填 → 全局找。恰好 1 个就登录（现有用户无感）；多个同名 → 409 让他补团队码。
+  let teamScope = null;
+  if (teamCode) {
+    const team = await db.findTeamByJoinCode(teamCode);
+    if (!team) {
+      // 团队码不存在也说"无效"，不区分"没这个团队"和"填错"，避免团队枚举
+      return { ok: false, data: null, error: { code: 401, message: '团队码或口令无效' } };
+    }
+    teamScope = team.id;
+  }
+  const rows = await db.findMemberByName(name, teamScope);
+  const list = Array.isArray(rows) ? rows : (rows ? [rows] : []);
+
+  if (list.length > 1) {
+    // 跨团队重名：不猜，让用户补团队码。这里必须给出可操作的提示，否则用户会以为是口令问题。
+    console.log('[POST /api/auth/login] 跨团队重名 count=', list.length, ' name=', name);
+    return { ok: false, data: null, error: { code: 409, message: '该名字在多个团队中存在，请填写团队码后重试' } };
+  }
+  const member = list.length === 1 ? list[0] : null;
 
   // 2) 校验口令；查不到时也空跑一次 scrypt，对齐耗时（纪律②）
   const ok = member
@@ -553,10 +654,71 @@ async function authLogin(event) {
 
   // 3) 签发令牌（没配 WORKSHOP_AUTH_SECRET 时这里抛 503 —— 设计好的 fail-closed）
   const token = identity.signToken(member);
-  console.log('[POST /api/auth/login] 登录成功 id=', member.id, ' name=', member.display_name);
+  const team = await publicTeam(Number(member.team_id), member.role).catch(() => null);
+  console.log('[POST /api/auth/login] 登录成功 id=', member.id, ' team=', member.team_id);
   return {
     ok: true,
-    data: { token, expiresInDays: identity.TOKEN_TTL_DAYS, member: publicMember(member) },
+    data: { token, expiresInDays: identity.TOKEN_TTL_DAYS, member: publicMember(member), team },
+    error: null,
+  };
+}
+
+/* —— 【2026-10-27 多团队】自助注册（邀请码加入）——
+   入参：{ joinCode, name, passcode }
+   设计取舍：
+     · 邀请码就是团队码，是唯一的准入凭据 —— 所以必须够随机、可更换（未来 v1.2）；
+     · 团队里【第一个】注册的人自动成为 admin（否则新团队没人能管成员）；
+     · 名字在团队内唯一（跨团队可同名），撞名返回 409；
+     · 口令最短 6 位，与 changePasscode 同口径；
+     · 注册成功直接发令牌，省一次登录往返。 */
+async function authRegister(event) {
+  const body = getBody(event);
+  const joinCode = String(body.joinCode || '').trim();
+  const name = String(body.name || '').trim();
+  const passcode = String(body.passcode || '');
+
+  if (!joinCode) return { ok: false, data: null, error: { code: 400, message: '缺少必填字段：团队码' } };
+  if (!name) return { ok: false, data: null, error: { code: 400, message: '缺少必填字段：成员名称' } };
+  if (name.length > 20) return { ok: false, data: null, error: { code: 400, message: '成员名称最多 20 个字' } };
+  if (passcode.length < 6) return { ok: false, data: null, error: { code: 400, message: '口令至少 6 位' } };
+
+  const team = await db.findTeamByJoinCode(joinCode);
+  if (!team) return { ok: false, data: null, error: { code: 401, message: '团队码无效，请向团队管理员确认' } };
+
+  // 团队内重名检查
+  const exist = await db.findMemberByName(name, team.id);
+  if (exist && exist.length) {
+    return { ok: false, data: null, error: { code: 409, message: '该团队已存在同名成员，换一个名字' } };
+  }
+
+  // 第一个人自动是管理员：新团队必须有人能管人，否则永远只能靠控制台 SQL
+  const memberCount = await db.countTeamMembers(team.id);
+  const role = memberCount === 0 ? 'admin' : 'member';
+
+  const salt = crypto.randomBytes(16).toString('hex');
+  const identityKey = identity.hashPasscode(passcode, salt);
+  const ins = await db.insertMemberWithAuth({ displayName: name, role, identityKey, salt, teamId: team.id });
+  if (ins.error) {
+    // 并发注册同名：唯一索引兜底，翻成人话
+    if (ins.error.code === 409) return { ok: false, data: null, error: { code: 409, message: '该团队已存在同名成员，换一个名字' } };
+    return { ok: false, data: null, error: ins.error };
+  }
+
+  const created = { id: ins.member.id, display_name: name, role, border_color: null, team_id: team.id };
+  const token = identity.signToken(created);
+  await db.insertAudit({
+    actorId: created.id, action: 'add_member', detail: `自助加入团队「${team.name}」，角色 ${role}`,
+    teamId: team.id,
+  }).catch(() => {});
+  console.log('[POST /api/auth/register] 注册成功 mid=', created.id, 'team=', team.id, 'role=', role);
+  return {
+    ok: true,
+    data: {
+      token,
+      expiresInDays: identity.TOKEN_TTL_DAYS,
+      member: publicMember(created),
+      team: { id: team.id, name: team.name, joinCode: role === 'admin' ? team.joinCode : null },
+    },
     error: null,
   };
 }
@@ -570,10 +732,23 @@ async function authVerify(event) {
     return { ok: false, data: null, error: { code: 401, message: '未提供身份令牌，请先登录' } };
   }
   const payload = identity.verifyToken(token); // 签名错 / 过期都在这里抛 401
+  // 【2026-10-27 多团队】返回团队信息。老令牌没有 tid → 回查库补齐（前端不必重新登录）
+  let teamId = payload.tid;
+  if (!teamId) {
+    try {
+      const m = await db.findMemberById(payload.mid);
+      teamId = m && m.teamId ? m.teamId : null;
+    } catch (_) { teamId = null; }
+  }
+  if (!teamId) {
+    return { ok: false, data: null, error: { code: 401, message: '身份信息不完整（缺少团队），请重新登录' } };
+  }
+  const team = await publicTeam(teamId, payload.role).catch(() => null);
   return {
     ok: true,
     data: {
-      member: { id: payload.mid, displayName: payload.name, role: payload.role },
+      member: { id: payload.mid, displayName: payload.name, role: payload.role, teamId },
+      team,
       expiresAt: new Date(payload.exp * 1000).toISOString(),
     },
     error: null,
@@ -587,7 +762,8 @@ async function authVerify(event) {
 //   ③ 心跳刷新失败不阻断：记日志、照常返回在线人数，前端下一轮再试；
 //   ④ 前端 30s 一次，2 分钟窗口判在线 → 关页面/断网最多滞留 2 分钟。
 async function heartbeat(event) {
-  const actor = resolveLogin(event);
+  const scope = await resolveReadScope(event);   // 登录用自己的团队；匿名落默认团队
+  const actor = scope.actor;
   if (actor) {
     try {
       await db.touchMember(actor.mid);
@@ -595,7 +771,8 @@ async function heartbeat(event) {
       console.error('[heartbeat] last_seen_at 刷新失败（不阻断）：', e && e.message);
     }
   }
-  const online = await db.countOnline(2);
+  // 【2026-10-27】在线人数按团队统计：别人团队的人不该算进你的数
+  const online = scope.teamId ? await db.countOnline(2, scope.teamId) : 0;
   return { ok: true, data: { online }, error: null };
 }
 
@@ -609,7 +786,7 @@ async function heartbeat(event) {
 // ⚠️ 已知限制：令牌 payload 含 role（7 天有效）→ 被改者需【重新登录】新角色才生效，UI 层会提示。
 async function setRole(event) {
   const body = getBody(event);
-  const actor = resolveLogin(event);
+  const actor = await resolveActor(event);   // 【多团队】带团队，管理员只管本团队
   if (!actor) {
     return { ok: false, data: null, error: { code: 401, message: '请先登录后再修改成员角色' } };
   }
@@ -628,10 +805,11 @@ async function setRole(event) {
     return { ok: false, data: null, error: { code: 403, message: '不能修改自己的角色（防止误操作丢失管理权限）' } };
   }
   const target = await db.findMemberById(memberId);
-  if (!target) {
+  // 【多团队】跨团队成员一律 404：不告诉管理员"这个 id 存在但不在你团队"
+  if (!target || target.teamId !== actor.teamId) {
     return { ok: false, data: null, error: { code: 404, message: '目标成员不存在' } };
   }
-  const result = await db.updateMemberRole(memberId, role);
+  const result = await db.updateMemberRole(memberId, role, actor.teamId);
   if (result.error) return { ok: false, data: null, error: result.error };
   if (result.notFound) {
     return { ok: false, data: null, error: { code: 404, message: '目标成员不存在' } };
@@ -641,6 +819,7 @@ async function setRole(event) {
     action: 'set_role',
     targetId: result.member.id,
     detail: `角色变更：${target.role || 'member'} → ${result.member.role}`,
+    teamId: actor.teamId,
   });
   console.log('[POST /api/setRole] 管理员', actor.mid, '将成员', memberId, '角色改为', role);
   return { ok: true, data: result.member, error: null };
@@ -675,7 +854,7 @@ function passcodeProblem(p) {
 // ⚠️ 已知限制：被重置者的旧令牌 7 天内仍有效（口令与令牌独立签名）→ 前端明示用新口令重新登录。
 async function resetPasscode(event) {
   const body = getBody(event);
-  const actor = resolveLogin(event);
+  const actor = await resolveActor(event);   // 【多团队】带团队
   if (!actor) {
     return { ok: false, data: null, error: { code: 401, message: '请先登录后再重置成员口令' } };
   }
@@ -687,7 +866,8 @@ async function resetPasscode(event) {
     return { ok: false, data: null, error: { code: 400, message: '缺少必填字段：成员 id' } };
   }
   const target = await db.findMemberById(memberId);
-  if (!target) {
+  // 【多团队】跨团队成员一律 404
+  if (!target || target.teamId !== actor.teamId) {
     return { ok: false, data: null, error: { code: 404, message: '目标成员不存在' } };
   }
   const plain = genPasscode(8);
@@ -703,6 +883,7 @@ async function resetPasscode(event) {
     action: 'reset_passcode',
     targetId: memberId,
     detail: '管理员重置成员口令（新口令已一次性展示给管理员，此处不留存）',
+    teamId: actor.teamId,
   });
   console.log('[POST /api/resetPasscode] 管理员', actor.mid, '重置成员', memberId, '的口令');
   return { ok: true, data: { member: result.member, passcode: plain }, error: null };
@@ -717,7 +898,7 @@ async function resetPasscode(event) {
 //   ④ 审计记 change_passcode（只记动作，不记任何口令）。
 async function changePasscode(event) {
   const body = getBody(event);
-  const actor = resolveLogin(event);
+  const actor = await resolveActor(event);   // 【多团队】带团队
   if (!actor) {
     return { ok: false, data: null, error: { code: 401, message: '请先登录后再修改口令' } };
   }
@@ -754,6 +935,7 @@ async function changePasscode(event) {
     action: 'change_passcode',
     targetId: actor.mid,
     detail: '本人修改自己的口令',
+    teamId: actor.teamId,
   });
   console.log('[POST /api/changePasscode] 成员', actor.mid, '修改了自己的口令');
   return { ok: true, data: { changed: true }, error: null };
@@ -767,7 +949,7 @@ async function changePasscode(event) {
 //   ④ 初始口令随机生成，明文只回这一次；审计不记口令。
 async function addMember(event) {
   const body = getBody(event);
-  const actor = resolveLogin(event);
+  const actor = await resolveActor(event);   // 【多团队】带团队，只能往自己团队加人
   if (!actor) {
     return { ok: false, data: null, error: { code: 401, message: '请先登录后再添加成员' } };
   }
@@ -785,23 +967,77 @@ async function addMember(event) {
   if (!ADD_MEMBER_ROLES.includes(role)) {
     return { ok: false, data: null, error: { code: 400, message: `角色取值无效：${role}（应为 ${ADD_MEMBER_ROLES.join(' / ')}）` } };
   }
-  const dup = await db.findMemberByName(name);
-  if (dup) {
+  // 【多团队】重名只在【本团队】内判：不同团队可以有同名成员
+  const dup = await db.findMemberByName(name, actor.teamId);
+  if (dup && dup.length) {
     return { ok: false, data: null, error: { code: 409, message: '该成员名称已存在，请换一个名称' } };
   }
   const plain = genPasscode(8);
   const salt = crypto.randomBytes(16).toString('hex');
   const identityKey = identity.hashPasscode(plain, salt);
-  const result = await db.insertMemberWithAuth({ displayName: name, role, identityKey, salt });
+  const result = await db.insertMemberWithAuth({ displayName: name, role, identityKey, salt, teamId: actor.teamId });
   if (result.error) return { ok: false, data: null, error: result.error };
   await db.insertAudit({
     actorId: actor.mid,
     action: 'add_member',
     targetId: result.member.id,
     detail: `管理员添加成员：${name}（${role}）`,
+    teamId: actor.teamId,
   });
   console.log('[POST /api/addMember] 管理员', actor.mid, '添加成员', name, '角色', role);
   return { ok: true, data: { member: result.member, passcode: plain }, error: null };
+}
+
+// ============ 【2026-10-27 多团队】团队信息 / 建团队 ============
+
+// 团队码生成：WS-XXXXXX（去掉易混字符，口头传达不易错）
+function genTeamCode() {
+  const bytes = crypto.randomBytes(6);
+  let s = '';
+  for (let i = 0; i < 6; i++) s += PASSCODE_CHARS[bytes[i] % PASSCODE_CHARS.length];
+  return 'WS-' + s;
+}
+
+// GET ?_action=team —— 我自己所在的团队（任何登录成员都能看；joinCode 只给 admin）
+async function teamInfo(event) {
+  const actor = await resolveActor(event);
+  if (!actor) return { ok: false, data: null, error: { code: 401, message: '请先登录后查看团队信息' } };
+  const t = await publicTeam(actor.teamId, actor.role);
+  if (!t) return { ok: false, data: null, error: { code: 404, message: '团队不存在，请联系管理员' } };
+  const memberCount = await db.countTeamMembers(actor.teamId);
+  return { ok: true, data: { team: { ...t, memberCount } }, error: null };
+}
+
+// POST ?_action=createteam —— 管理员建一个新团队，拿到团队码后分享给别人自助加入。
+// 语义要点：建团队【不会】把创建者搬过去（一个人只属于一个团队），
+//   创建者继续待在自己团队；新团队由第一个用该码注册的人成为 admin。
+async function createTeamEndpoint(event) {
+  const body = getBody(event);
+  const actor = await resolveActor(event);
+  if (!actor) return { ok: false, data: null, error: { code: 401, message: '请先登录后再创建团队' } };
+  if (String(actor.role || '') !== 'admin') {
+    return { ok: false, data: null, error: { code: 403, message: '只有管理员可以创建团队' } };
+  }
+  const name = String(body.name || '').trim();
+  if (!name) return { ok: false, data: null, error: { code: 400, message: '缺少必填字段：团队名称' } };
+  if (name.length > 60) return { ok: false, data: null, error: { code: 400, message: '团队名称最长 60 字符' } };
+  let code = String(body.joinCode || '').trim().toUpperCase();
+  if (code) {
+    if (!/^[A-Z0-9-]{4,32}$/.test(code)) {
+      return { ok: false, data: null, error: { code: 400, message: '团队码只能包含大写字母、数字和短横线（4–32 位）' } };
+    }
+  } else {
+    code = genTeamCode();
+  }
+  const r = await db.createTeam({ name, joinCode: code, note: body.note });
+  if (r.conflict) return { ok: false, data: null, error: { code: 409, message: '该团队码已被占用，请换一个' } };
+  if (r.error) return { ok: false, data: null, error: r.error };
+  await db.insertAudit({
+    actorId: actor.mid, action: 'create_team', targetId: r.team.id,
+    detail: `创建团队「${name}」（团队码 ${r.team.joinCode}）`, teamId: actor.teamId,
+  }).catch(() => {});
+  console.log('[POST /api/createTeam] 管理员', actor.mid, '创建团队', r.team.id, r.team.joinCode);
+  return { ok: true, data: { team: r.team }, error: null };
 }
 
 // 真正的业务分发（原 exports.main 的本体）。外面再包一层，只为记一行请求日志。
@@ -856,10 +1092,44 @@ async function handle(event = {}) {
     }
   }
 
+  // 【2026-10-27 多团队】自助注册（邀请码加入）：路径或 _action 两条路都收
+  const wantsRegister = action === 'register' || /\/auth\/register(\/|\?|$)/.test(p0);
+  if (wantsRegister && method === 'POST') {
+    try { return http(event, await authRegister(event)); }
+    catch (err) {
+      logError('POST /api/auth/register', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
+    }
+  }
+
+  // 【多团队】团队信息 / 建团队
+  if (action === 'team' && method === 'GET') {
+    try { return http(event, await teamInfo(event)); }
+    catch (err) {
+      logError('GET /api/team', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
+    }
+  }
+  if (action === 'createteam' && method === 'POST') {
+    try { return http(event, await createTeamEndpoint(event)); }
+    catch (err) {
+      logError('POST /api/createTeam', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
+    }
+  }
+
   // 【阶段二 P9】成员列表（供前端"归属给谁"下拉；只读，不含凭据）
+  // 【多团队】只列【本团队】成员：登录用自己团队，匿名落默认团队
   if (action === 'members' && method === 'GET') {
     try {
-      const list = await db.listMembers();
+      const scope = await resolveReadScope(event);
+      if (!scope.teamId) {
+        return http(event, { ok: false, data: null, error: { code: 500, message: '团队未初始化，请联系管理员' } }, 500);
+      }
+      const list = await db.listMembers(scope.teamId);
       return http(event, { ok: true, data: list, error: null });
     } catch (err) {
       logError('GET /api/members', err);
@@ -948,9 +1218,15 @@ async function handle(event = {}) {
     }
   }
   // 默认 GET：列表读取（调 DAL）
+  // 【2026-10-27 多团队】范围由服务端定：登录看自己团队，匿名看默认团队。
+  //   ★ 绝不接受前端传 teamId —— 那等于让客户端自己划数据边界。
   const q = getQuery(event);
   try {
-    const data = await db.queryItems(q);
+    const scope = await resolveReadScope(event);
+    if (!scope.teamId) {
+      return http(event, { ok: false, data: null, error: { code: 500, message: '团队未初始化，请联系管理员' } }, 500);
+    }
+    const data = await db.queryItems(q, scope.teamId);
     return http(event, { ok: true, data, error: null });
   } catch (err) {
     logError('GET /api/items', err);

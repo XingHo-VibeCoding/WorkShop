@@ -1597,6 +1597,18 @@ function renderSettings() {
     // 【阶段二 Step5】添加成员按钮（admin 专属；重置口令按钮在 renderMemberAdmin 内部逐行绑）
     const btnAdd = document.getElementById('btn-add-member');
     if (btnAdd) btnAdd.onclick = submitAddMember;
+    // 【2026-10-27 多团队】团队信息 + 建团队（admin 专属）
+    renderTeamBox();
+    const btnTeam = document.getElementById('btn-create-team');
+    if (btnTeam) btnTeam.onclick = submitCreateTeam;
+    const btnCopy = document.getElementById('btn-copy-team-code');
+    if (btnCopy) btnCopy.onclick = () => {
+      const code = (document.getElementById('team-code') || {}).textContent || '';
+      if (!code || code.indexOf('仅管理员') >= 0) { showToast('暂无可复制的团队码'); return; }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(code).then(() => showToast('团队码已复制')).catch(() => showToast('复制失败，请手动选中复制'));
+      } else { showToast('当前浏览器不支持自动复制，请手动选中复制'); }
+    };
   }
   renderPasscodeSettings();  // 【阶段二 Step5】任意登录成员可改自己的口令（匿名时区块隐藏，绑了也无害）
   document.getElementById('set-default-view').value = defaultStartMode;
@@ -1996,6 +2008,52 @@ function startAutoSync() {
   _syncTimer = setInterval(() => { syncTick(); }, SYNC_INTERVAL);
   // 切回标签页立刻补一次，不用等下一个 15s
   document.addEventListener('visibilitychange', () => { if (!document.hidden) syncTick(); });
+}
+
+// ============ 【2026-10-27 多团队】团队信息 / 建团队（仅管理员）============
+// 团队码 = 邀请码：别人在登录页点「用团队邀请码加入」，填它就能创建账号。
+// 注意：建团队【不会】把自己搬过去（一个人只属于一个团队），
+//   新团队由第一个用该码加入的人成为管理员（后端 authRegister 里定的）。
+async function renderTeamBox() {
+  const nameEl = document.getElementById('team-name');
+  const codeEl = document.getElementById('team-code');
+  const errEl = document.getElementById('team-err');
+  if (errEl) errEl.hidden = true;
+  try {
+    const data = await apiMutate('GET', `${API_BASE}/api/items?_action=team`);
+    const t = (data && data.team) || {};
+    if (nameEl) nameEl.textContent = t.name || '—';
+    if (codeEl) codeEl.textContent = t.joinCode || '（仅管理员可见）';
+  } catch (e) {
+    if (errEl) { errEl.textContent = '读取团队信息失败：' + e.message; errEl.hidden = false; }
+  }
+}
+
+async function submitCreateTeam() {
+  const input = document.getElementById('new-team-name');
+  const errEl = document.getElementById('team-err');
+  const btn = document.getElementById('btn-create-team');
+  const name = ((input && input.value) || '').trim();
+  if (errEl) errEl.hidden = true;
+  if (!name) {
+    if (errEl) { errEl.textContent = '请先填写新团队名称'; errEl.hidden = false; }
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.textContent = '创建中…'; }
+  try {
+    const data = await apiMutate('POST', `${API_BASE}/api/items?_action=createteam`, { name });
+    const t = (data && data.team) || {};
+    if (input) input.value = '';
+    // 邀请码复制到剪贴板（失败不影响主流程）
+    if (t.joinCode && navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t.joinCode).catch(() => {});
+    }
+    showToast(`团队「${t.name}」已创建，邀请码 ${t.joinCode}（已复制）。把它发给大家，第一个加入的人会成为该团队管理员。`);
+  } catch (e) {
+    if (errEl) { errEl.textContent = '创建团队失败：' + e.message; errEl.hidden = false; }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '+ 创建团队'; }
+  }
 }
 
 // 部门/标记变更后：实时刷新时间线 + 当前详情

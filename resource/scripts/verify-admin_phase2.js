@@ -28,6 +28,8 @@
 const path = require('path');
 
 let pass = 0, fail = 0;
+// 【多团队】测试用团队 id（db 层已强制要求，缺了就抛错）
+const TEAM = 1;
 const fails = [];
 
 function check(name, cond, detail) {
@@ -109,11 +111,12 @@ function runDbOffline() {
 
       // —— countOnline ——
       calls.length = 0;
-      const n = await db.countOnline(2);
+      const n = await db.countOnline(2, TEAM);
       const cc = calls[0];
       check('countOnline 返回行数 3', n === 3, String(n));
       check('countOnline 带 last_seen_at=gte. 窗口', !!cc && cc.u.includes('last_seen_at=gte.'), cc && cc.u);
       check('countOnline select 只取 id', !!cc && cc.u.includes('select=id'), cc && cc.u);
+      check('countOnline ★带 team_id 过滤（在线数按团队统计）', !!cc && cc.u.includes('team_id=eq.' + TEAM), cc && cc.u);
       // 窗口换算：gte 的时间戳应约等于 now-120s（容差 5s）
       const m = /last_seen_at=gte\.([^&]+)/.exec(cc.u || '');
       const since = m ? decodeURIComponent(m[1]) : '';
@@ -123,11 +126,12 @@ function runDbOffline() {
 
       // —— updateMemberRole ——
       calls.length = 0;
-      const r = await db.updateMemberRole(7, 'readonly');
+      const r = await db.updateMemberRole(7, 'readonly', TEAM);
       const uc = calls[0];
       check('updateMemberRole 返回 member 映射', !!r.member && r.member.id === 7 && r.member.role === 'readonly' && r.member.displayName === '测试乙', JSON.stringify(r));
       check('updateMemberRole ★带 id=eq. 过滤（防整表改角色）', !!uc && uc.u.includes('id=eq.7'), uc && uc.u);
       check('updateMemberRole body.role 正确', !!uc && uc.body && uc.body.role === 'readonly', uc && JSON.stringify(uc.body));
+      check('updateMemberRole ★带 team_id 过滤（管理员只能改本团队）', !!uc && uc.u.includes('team_id=eq.' + TEAM), uc && uc.u);
 
       // —— updateMemberRole：0 行命中 → notFound ——
       global.fetch = async (url, opts) => {
@@ -136,7 +140,7 @@ function runDbOffline() {
         }
         return { ok: false, status: 500, text: async () => 'mock: unexpected' };
       };
-      const r2 = await db.updateMemberRole(999, 'admin');
+      const r2 = await db.updateMemberRole(999, 'admin', TEAM);
       check('updateMemberRole 0 行命中 → notFound', r2.notFound === true, JSON.stringify(r2));
 
       // —— updateMemberRole：非法 mid 不发起请求（短路） ——
@@ -144,6 +148,35 @@ function runDbOffline() {
       global.fetch = async () => { throw new Error('不该被调用'); };
       const r3 = await db.updateMemberRole(-1, 'admin');
       check('updateMemberRole 非法 mid 短路不发请求', r3.notFound === true && calls.length === 0, JSON.stringify(r3));
+
+      // ============ 【2026-10-27 多团队】隔离硬约束：缺 teamId 必须抛错 ============
+      // 这是本次改动最重要的一条不变量：漏传团队时宁可 500，也绝不能静默返回全库。
+      {
+        const cases = [
+          ['queryItems 缺 teamId', () => db.queryItems({})],
+          ['findItemById 缺 teamId', () => db.findItemById(1)],
+          ['updateItem 缺 teamId', () => db.updateItem(1, { title: 'x' }, null)],
+          ['deleteItem 缺 teamId', () => db.deleteItem(1)],
+          ['listMembers 缺 teamId', () => db.listMembers()],
+          ['countOnline 缺 teamId', () => db.countOnline(2)],
+          ['updateMemberRole 缺 teamId', () => db.updateMemberRole(7, 'admin')],
+          ['findDuplicate 缺 teamId', () => db.findDuplicate({ title: 't', table: 'work', type: 'meeting', start: 'a', end: 'b', ownerKey: 'self' })],
+          ['insertMemberWithAuth 缺 teamId', () => db.insertMemberWithAuth({ displayName: 'x', role: 'member', identityKey: 'k', salt: 's' })],
+        ];
+        global.fetch = async () => { throw new Error('缺 teamId 时不该发起任何请求'); };
+        for (const [label, fn] of cases) {
+          let threw = null;
+          try { await fn(); } catch (e) { threw = e; }
+          check(label + ' → 抛错（不静默查全库）', !!threw && /teamId/.test(String(threw.message)), threw ? threw.message : '未抛错');
+        }
+        // 非法值同样拒绝
+        let bad = null;
+        try { await db.queryItems({}, 0); } catch (e) { bad = e; }
+        check('teamId=0 → 抛错', !!bad, bad ? bad.message : '未抛错');
+        bad = null;
+        try { await db.listMembers('abc'); } catch (e) { bad = e; }
+        check('teamId 非数字 → 抛错', !!bad, bad ? bad.message : '未抛错');
+      }
 
       // ===================== Step5 口令体系：db 三新函数 =====================
       // 换一版更精细的 mock（按 URL 特征分流，避免与上面的场景串味）
@@ -208,13 +241,13 @@ function runDbOffline() {
         return { ok: false, status: 500, text: async () => 'mock: unexpected' };
       };
       calls.length = 0;
-      const ins = await db.insertMemberWithAuth({ displayName: '新成员', role: 'readonly', identityKey: 'e'.repeat(128), salt: 'f'.repeat(32) });
+      const ins = await db.insertMemberWithAuth({ displayName: '新成员', role: 'readonly', identityKey: 'e'.repeat(128), salt: 'f'.repeat(32), teamId: TEAM });
       const ic = calls[0];
       check('insertMemberWithAuth 返回新成员映射', !!ins.member && ins.member.id === 9 && ins.member.role === 'readonly', JSON.stringify(ins));
       check('insertMemberWithAuth 用 POST + auth_kind=passcode', !!ic && ic.method === 'POST' && ic.body && ic.body.auth_kind === 'passcode', ic && JSON.stringify(ic.body));
       check('insertMemberWithAuth 空名字直接 error 不发请求', (await (async () => {
         calls.length = 0;
-        const bad = await db.insertMemberWithAuth({ displayName: '  ', role: 'member', identityKey: 'x', salt: 'y' });
+        const bad = await db.insertMemberWithAuth({ displayName: '  ', role: 'member', identityKey: 'x', salt: 'y', teamId: TEAM });
         return bad.error && calls.length === 0;
       })()) === true);
     } catch (e) {
@@ -237,7 +270,8 @@ function runFlowOffline() {
   const idx = require(path.join(__dirname, '..', '..', 'source', 'cloud', 'items', 'index.js'));
   const db = require(path.join(__dirname, '..', '..', 'source', 'cloud', 'items', 'db.js'));
 
-  const token = (role, id) => identity.signToken({ id, display_name: '测试-' + role, role });
+  // 【多团队】令牌带 team_id：这样 resolveActor 无需回查库补齐团队
+  const token = (role, id) => identity.signToken({ id, display_name: '测试-' + role, role, team_id: TEAM });
   const evt = (action, body, tok) => ({
     httpMethod: 'POST',
     queryString: { _action: action },
@@ -249,11 +283,18 @@ function runFlowOffline() {
   // —— db 打桩 ——
   let auditCalls = [];
   let touched = [];
-  db.findMemberById = async (id) => (Number(id) === 7 ? { id: 7, displayName: '测试乙', role: 'member' } : null);
+  db.findMemberById = async (id) => (Number(id) === 7 ? { id: 7, displayName: '测试乙', role: 'member', teamId: TEAM } : null);
   db.updateMemberRole = async (id, role) => ({ member: { id, displayName: '测试乙', role } });
   db.insertAudit = async (row) => { auditCalls.push(row); };
   db.touchMember = async (mid) => { touched.push(mid); };
   db.countOnline = async () => 5;
+  // 【多团队】团队表打桩：默认团队解析、注册、建团队都靠它
+  db.findTeamByJoinCode = async (code) => (String(code).toUpperCase() === 'WS-DEFAULT'
+    ? { id: TEAM, name: '默认团队', joinCode: 'WS-DEFAULT' }
+    : (String(code).toUpperCase() === 'WS-NEW1' ? { id: 2, name: '新团队', joinCode: 'WS-NEW1' } : null));
+  db.findTeamById = async (id) => (Number(id) === TEAM ? { id: TEAM, name: '默认团队', joinCode: 'WS-DEFAULT' } : null);
+  db.countTeamMembers = async () => 3;
+  db.createTeam = async ({ name, joinCode }) => ({ team: { id: 9, name, joinCode } });
 
   // —— Step5 打桩（口令体系三端点）——
   const SALT_OLD = 'ab'.repeat(16);                    // 32 字符 hex
@@ -263,7 +304,8 @@ function runFlowOffline() {
     : null);
   db.updateMemberPasscode = async (id, key, salt) => ({ member: { id, displayName: '测试-member', role: 'member' } });
   db.insertMemberWithAuth = async (row) => ({ member: { id: 9, displayName: row.displayName, role: row.role } });
-  db.findMemberByName = async (name) => (String(name) === '已存在' ? { id: 5, display_name: '已存在' } : null);
+  // 【多团队】新契约：返回【数组】（可能 0/1/多行，多行 = 跨团队重名）
+  db.findMemberByName = async (name) => (String(name) === '已存在' ? [{ id: 5, display_name: '已存在', team_id: TEAM }] : []);
 
   return (async () => {
     const adminTok = token('admin', 3);

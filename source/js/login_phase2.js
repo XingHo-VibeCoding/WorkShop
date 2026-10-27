@@ -23,18 +23,47 @@
     return h;
   }
 
-  async function login(name, passcode) {
+  // 【2026-10-27 多团队】teamCode 可选：不填则后端全局按名字找，唯一命中即登录；
+  // 只有跨团队重名时后端才回 409 要求补团队码。
+  async function login(name, passcode, teamCode) {
+    const payload = { name, passcode };
+    if (teamCode && String(teamCode).trim()) payload.teamCode = String(teamCode).trim().toUpperCase();
     const r = await fetch(`${API_BASE}/api/items?_action=login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, passcode }),
+      body: JSON.stringify(payload),
     });
     const j = await r.json().catch(() => null);
     if (!r.ok || !j || !j.ok) {
       throw new Error((j && j.error && j.error.message) || '登录失败，请检查成员名称与口令');
     }
     setToken(j.data.token);
-    setInfo(j.data.member);
+    applyLoginData(j.data);
+    renderIdentity();
+    return j.data.member;
+  }
+
+  // 登录/注册成功后统一落库：成员信息 + 团队名（团队名只做展示，不参与权限判断）
+  function applyLoginData(data) {
+    const info = Object.assign({}, data.member || {});
+    if (data.team && data.team.name) info.teamName = data.team.name;
+    if (data.team && data.team.id) info.teamId = data.team.id;
+    setInfo(info);
+  }
+
+  // 【2026-10-27 多团队】用团队邀请码自助加入（注册即登录）
+  async function register(joinCode, name, passcode) {
+    const r = await fetch(`${API_BASE}/api/items?_action=register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ joinCode: String(joinCode || '').trim().toUpperCase(), name, passcode }),
+    });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j || !j.ok) {
+      throw new Error((j && j.error && j.error.message) || '加入失败，请检查邀请码');
+    }
+    setToken(j.data.token);
+    applyLoginData(j.data);
     renderIdentity();
     return j.data.member;
   }
@@ -50,7 +79,7 @@
       });
       const j = await r.json().catch(() => null);
       if (!r.ok || !j || !j.ok) { clearToken(); renderIdentity(); return null; }
-      setInfo(j.data.member || j.data);
+      applyLoginData(j.data);
       renderIdentity();
       return j.data.member || j.data;
     } catch (_) {
@@ -88,10 +117,13 @@
     const info = getInfo();
     if (info) {
       const name = info.displayName || info.name || '成员';
+      const teamName = info.teamName || '';
       zone.innerHTML =
-        '<span class="id-chip" title="当前登录身份：' + escapeHtml(name) + '">'
+        '<span class="id-chip" title="当前登录身份：' + escapeHtml(name) + (teamName ? '（' + escapeHtml(teamName) + '）' : '') + '">'
         + '<span class="id-dot" style="background:' + (info.borderColor || '#999') + '"></span>'
-        + escapeHtml(name) + '</span>'
+        + escapeHtml(name)
+        + (teamName ? '<span class="id-team">' + escapeHtml(teamName) + '</span>' : '')
+        + '</span>'
         + '<button id="btn-only-mine" class="id-btn" title="只看 ' + escapeHtml(name) + ' 建/改的日程">只看 ' + escapeHtml(name) + ' 的</button>'
         + '<button id="btn-logout" class="id-btn" title="退出登录">退出</button>';
       const onlyMine = document.getElementById('btn-only-mine');
@@ -115,9 +147,15 @@
     bindCloseOnce();
     const nameEl = document.getElementById('login-name');
     const passEl = document.getElementById('login-pass');
+    const teamEl = document.getElementById('login-team');
     const errEl = document.getElementById('login-error');
     if (errEl) errEl.textContent = '';
     if (nameEl) nameEl.focus();
+    const gotoReg = document.getElementById('btn-goto-register');
+    if (gotoReg && !gotoReg.dataset.bound) {
+      gotoReg.dataset.bound = '1';
+      gotoReg.addEventListener('click', openRegisterModal);
+    }
     const form = document.getElementById('login-form');
     if (form && !form.dataset.bound) {
       form.dataset.bound = '1';
@@ -125,11 +163,12 @@
         e.preventDefault();
         const name = (nameEl && nameEl.value || '').trim();
         const pass = (passEl && passEl.value) || '';
+        const teamCode = (teamEl && teamEl.value || '').trim();   // 团队码可选
         if (!name || !pass) { if (errEl) errEl.textContent = '请输入成员名称和口令'; return; }
         const submitBtn = document.getElementById('login-submit');
         if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = '登录中…'; }
         try {
-          const member = await login(name, pass);
+          const member = await login(name, pass, teamCode);
           if (errEl) errEl.textContent = '';
           closeLoginModal();
           if (typeof window.bootstrap === 'function') window.bootstrap(); // 重新拉取（带令牌写归属）
@@ -144,6 +183,73 @@
           }
         } finally {
           if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '登录'; }
+        }
+      });
+    }
+  }
+
+  // ============ 【2026-10-27 多团队】加入团队（邀请码注册）弹窗 ============
+  function openRegisterModal() {
+    const m = document.getElementById('register-modal');
+    if (!m) return;
+    closeLoginModal();               // 两个弹窗不叠加
+    m.hidden = false;
+    const errEl = document.getElementById('register-error');
+    if (errEl) errEl.textContent = '';
+    const codeEl = document.getElementById('reg-code');
+    if (codeEl) codeEl.focus();
+    bindRegisterOnce();
+  }
+
+  function closeRegisterModal() {
+    const m = document.getElementById('register-modal');
+    if (m) m.hidden = true;
+  }
+
+  function bindRegisterOnce() {
+    const m = document.getElementById('register-modal');
+    if (!m || m.dataset.bound) return;
+    m.dataset.bound = '1';
+
+    const close = () => closeRegisterModal();
+    const x = document.getElementById('register-close');
+    const cancel = document.getElementById('register-cancel');
+    if (x) x.addEventListener('click', close);
+    if (cancel) cancel.addEventListener('click', close);
+    m.addEventListener('click', (e) => { if (e.target === m) close(); });
+    const back = document.getElementById('btn-goto-login');
+    if (back) back.addEventListener('click', () => { closeRegisterModal(); openLoginModal(); });
+
+    const form = document.getElementById('register-form');
+    if (form) {
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const errEl = document.getElementById('register-error');
+        const code = (document.getElementById('reg-code') || {}).value || '';
+        const name = ((document.getElementById('reg-name') || {}).value || '').trim();
+        const pass = (document.getElementById('reg-pass') || {}).value || '';
+        const pass2 = (document.getElementById('reg-pass2') || {}).value || '';
+        const fail = (msg) => { if (errEl) errEl.textContent = msg; };
+        if (!code.trim()) return fail('请填写团队邀请码');
+        if (!name) return fail('请填写你的名字');
+        if (pass.length < 6) return fail('口令至少 6 位');
+        if (pass !== pass2) return fail('两次输入的口令不一致');
+
+        const btn = document.getElementById('register-submit');
+        if (btn) { btn.disabled = true; btn.textContent = '加入中…'; }
+        try {
+          const member = await register(code, name, pass);
+          closeRegisterModal();
+          if (typeof window.bootstrap === 'function') window.bootstrap();
+          const info = getInfo() || {};
+          const tips = info.role === 'admin'
+            ? '你是这个团队的第一个成员，已自动成为管理员'
+            : '已加入团队';
+          if (typeof window.showToast === 'function') window.showToast(tips + '：' + (member.displayName || name));
+        } catch (err) {
+          fail((err && err.message) || '加入失败');
+        } finally {
+          if (btn) { btn.disabled = false; btn.textContent = '加入'; }
         }
       });
     }
@@ -189,12 +295,15 @@
     currentMember: getInfo,
     withHeaders,
     login,
+    register,
     verifyRestore,
     logout,
     members: listMembers,
     renderIdentity,
     openLoginModal,
     closeLoginModal,
+    openRegisterModal,
+    closeRegisterModal,
   };
 
   // 初始化：页面加载即尝试用本地令牌恢复身份
