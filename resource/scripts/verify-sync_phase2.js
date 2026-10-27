@@ -4,10 +4,10 @@
 //   · sync-logic  = 假数据 + 假 fetch，只测逻辑分支（离线、秒级、不进生产）
 //   · 本脚本      = **真实前端代码 + 真实线上接口**，验证"别人真的新建一条，轮询能不能检测到"
 // 做法：载入 timeline.js（vm + DOM 桩，fetch 用 Node 原生）→ bootstrap 建基线
-//      → 匿名建一条本周日程 → syncTick() 应检测到并重绘 → 删掉 → syncTick() 应再检测到
+//      → 用登录令牌建一条本周日程（模拟另一端写入）→ syncTick() 应检测到并重绘 → 删掉 → 应再检测到
 //      → 核对数据复原到基线条数。
 // 安全：全程 try/finally，无论成败都尝试删掉临时项；跑完打印最终条数供人工核对。
-// 前置：本机可访问线上接口（无需账号，走匿名遗留可写面 seam A）。
+// 前置：本机可访问线上接口 + WORKSHOP_ADMIN_NAME / WORKSHOP_ADMIN_PASS（匿名写入已于 2026-10-27 关闭）。
 // 用法：node resource/scripts/verify-sync_phase2.js
 // 退出码：0 全部通过；1 有失败。
 // ---------------------------------------------------------------------------
@@ -119,6 +119,23 @@ const monday = new Date(now); monday.setDate(now.getDate() - ((now.getDay() + 6)
 const D = (d, hhmm) => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${hhmm}`;
 const STAMP = '二次检验临时项-' + Date.now();
 let createdId = null;
+let baseTotal = -1;   // 全库基线（finally 里要用，故提到 try 外）
+
+// 【多团队 2026-10-27】匿名写入已关闭（seam A 修复）→ 写探针必须带登录令牌。
+// 从前这里是「匿名遗留可写面」，现在按新契约改成登录写入；拿不到令牌则如实报错，不静默放行。
+let AUTH = {};
+async function loginProbe() {
+  const name = process.env.WORKSHOP_ADMIN_NAME || '';
+  const pass = process.env.WORKSHOP_ADMIN_PASS || '';
+  if (!name || !pass) throw new Error('缺少 WORKSHOP_ADMIN_NAME / WORKSHOP_ADMIN_PASS（匿名写入已关闭，写探针需登录）');
+  const r = await fetch(API + '?_action=login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, passcode: pass }),
+  });
+  const j = await r.json();
+  if (!j.ok || !j.data || !j.data.token) throw new Error(`探针登录失败 HTTP ${r.status} ${(j.error && j.error.message) || ''}`);
+  AUTH = { 'X-Member-Token': j.data.token };
+}
 
 async function apiCount() {
   const r = await fetch(API);
@@ -128,6 +145,8 @@ async function apiCount() {
 
 (async () => {
   try {
+    await loginProbe();
+    baseTotal = await apiCount();
     console.log('──────── 0. 首屏加载（真实接口）────────');
     await sandbox.bootstrap();
     const baseCount = probe.items.length;
@@ -142,14 +161,14 @@ async function apiCount() {
       startTime: D(monday, '20:00'), endTime: D(monday, '21:00'),
       attendees: '', venue: '', note: '自动同步探针创建，稍后自动删除', ownerKey: 'depta',
     };
-    const cr = await fetch(API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const cr = await fetch(API, { method: 'POST', headers: { 'Content-Type': 'application/json', ...AUTH }, body: JSON.stringify(body) });
     const cj = await cr.json();
     if (!cr.ok || !cj.ok) {
-      check('匿名新建（seam A 遗留可写）', false, `HTTP ${cr.status} ${JSON.stringify(cj).slice(0, 160)}`);
+      check('登录成员新建（另一端的写入）', false, `HTTP ${cr.status} ${JSON.stringify(cj).slice(0, 160)}`);
       throw new Error('__abort__');
     }
     createdId = cj.data.id;
-    check('匿名新建成功（拿到 id）', !!createdId, 'id=' + createdId);
+    check('登录成员新建成功（拿到 id）', !!createdId, 'id=' + createdId);
 
     renderCalls = 0; toastMsgs = [];
     await probe.syncTick();
@@ -164,7 +183,7 @@ async function apiCount() {
     check('无变化 → 不弹提示', toastMsgs.length === 0, JSON.stringify(toastMsgs));
 
     console.log('\n──────── 3. 删掉它 → 轮询应检测到删除 ────────');
-    const dr = await fetch(`${API}?id=${createdId}&confirm=true`, { method: 'DELETE' });
+    const dr = await fetch(`${API}?id=${createdId}&confirm=true`, { method: 'DELETE', headers: { ...AUTH } });
     const dj = await dr.json();
     check('删除成功（带 confirm 闸）', dr.ok && dj.ok, `HTTP ${dr.status} ${JSON.stringify(dj).slice(0, 160)}`);
     createdId = null;
@@ -182,14 +201,14 @@ async function apiCount() {
     // 兜底清理：无论成败都不留垃圾数据
     if (createdId) {
       try {
-        await fetch(`${API}?id=${createdId}&confirm=true`, { method: 'DELETE' });
+        await fetch(`${API}?id=${createdId}&confirm=true`, { method: 'DELETE', headers: { ...AUTH } });
         console.log('  🧹 已兜底清理临时项 id=' + createdId);
       } catch (_) { console.log('  ⚠️ 兜底清理失败，请手动删除 id=' + createdId); }
     }
     const total = await apiCount().catch(() => -1);
     console.log('\n──────── 数据核对 ────────');
-    console.log('全库最终条数：' + total + '（应为 11）');
-    check('全库数据复原（无残留）', total === 11, '实际 ' + total);
+    console.log('全库最终条数：' + total + '（应为基线 ' + baseTotal + '）');
+    check('全库数据复原（无残留）', total === baseTotal, '实际 ' + total + ' vs 基线 ' + baseTotal);
 
     console.log('\n──────── 小结 ────────');
     console.log('通过 ' + pass + ' · 失败 ' + fail);

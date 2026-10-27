@@ -519,8 +519,10 @@ async function runLive() {
 
     // ===================== Step5 口令体系：线上链路 =====================
     console.log('\n  —— Step5 口令体系（addMember → resetPasscode → changePasscode 全链路） ——');
+    // ★ 幂等：成员名带时间戳后缀，否则二次运行必 409（2026-10-27 实测踩到）
+    const NB = '验收丙-L-' + Date.now().toString().slice(-5);
     // ① admin 添加成员 → 拿初始口令
-    const add1 = await req('POST', 'addmember', { displayName: '验收丙-L', role: 'member' }, admin.token);
+    const add1 = await req('POST', 'addmember', { displayName: NB, role: 'member' }, admin.token);
     check('addMember admin 正常 → 200 且回 8 位初始口令',
       add1.status === 200 && add1.j && add1.j.ok && /^[A-HJ-NP-Z2-9]{8}$/.test(add1.j.data.passcode || ''),
       `status=${add1.status}`);
@@ -531,7 +533,7 @@ async function runLive() {
     } else {
       // ② 新成员用初始口令登录（证明初始口令链路通）
       let li;
-      try { li = await login('验收丙-L', initialPass); } catch (e) { li = null; }
+      try { li = await login(NB, initialPass); } catch (e) { li = null; }
       check('新成员初始口令可登录', !!li && !!li.token, li ? 'ok' : '登录失败');
 
       // ③ admin 重置该成员口令 → 拿新口令
@@ -541,7 +543,7 @@ async function runLive() {
         rs.status === 200 && /^[A-HJ-NP-Z2-9]{8}$/.test(resetPass || ''), `status=${rs.status}`);
       // ④ 新口令可登录（证明重置链路通）
       let li2;
-      try { li2 = await login('验收丙-L', resetPass); } catch (e) { li2 = null; }
+      try { li2 = await login(NB, resetPass); } catch (e) { li2 = null; }
       check('重置后新口令可登录', !!li2 && !!li2.token, li2 ? 'ok' : '登录失败');
 
       // ⑤ 自助改口令（旧=重置来的新口令，新=固定值）
@@ -549,17 +551,17 @@ async function runLive() {
       check('changePasscode 正常 → 200', ch.status === 200 && ch.j && ch.j.ok && ch.j.data && ch.j.data.changed === true, `status=${ch.status}`);
       // ⑥ 自助改后的口令可登录（证明自助改链路通；且证明 resetPass 已失效是预期内的）
       let li3;
-      try { li3 = await login('验收丙-L', 'SelfChange2026'); } catch (e) { li3 = null; }
+      try { li3 = await login(NB, 'SelfChange2026'); } catch (e) { li3 = null; }
       check('自助改后新口令可登录', !!li3 && !!li3.token, li3 ? 'ok' : '登录失败');
 
       // ⑦ 旧口令应已失效（resetPass 再登录应失败）
       let li4err = null;
-      try { await login('验收丙-L', resetPass); } catch (e) { li4err = e; }
+      try { await login(NB, resetPass); } catch (e) { li4err = e; }
       check('旧口令（重置前那把）已失效', !!li4err, li4err ? '已失效' : '仍可登录（预期外）');
     }
 
     // ⑧ addMember 越权与参数分支
-    const addDup = await req('POST', 'addmember', { displayName: '验收丙-L', role: 'member' }, admin.token);
+    const addDup = await req('POST', 'addmember', { displayName: NB, role: 'member' }, admin.token);
     check('addMember 重名 → 409', addDup.status === 409, `status=${addDup.status}`);
     const addBadRole = await req('POST', 'addmember', { displayName: '越权角色', role: 'admin' }, admin.token);
     check('addMember admin 角色 → 400（UI 通道刻意不给）', addBadRole.status === 400, `status=${addBadRole.status}`);
@@ -578,8 +580,8 @@ async function runLive() {
     check('changePasscode 无令牌 → 401', chNoTok.status === 401, `status=${chNoTok.status}`);
     const chBadOld = await req('POST', 'changepasscode', { oldPasscode: 'wrong', newPasscode: 'newpass123' }, admin.token);
     check('changePasscode 旧口令错 → 401', chBadOld.status === 401, `status=${chBadOld.status}`);
-    console.log('  ℹ️ 线上验收产生的「验收丙-L」为一次性测试账号；如想清理：');
-    console.log("     DELETE FROM members_phase2 WHERE display_name = '验收丙-L';（控制台执行，可选）");
+    console.log(`  ℹ️ 线上验收产生的「${NB}」为一次性测试账号；如想清理：`);
+    console.log(`     DELETE FROM members_phase2 WHERE display_name = '${NB}';（控制台执行，可选）`);
   } catch (e) {
     console.log('\n❌ 线上校验异常：', e.message); fail++;
   }

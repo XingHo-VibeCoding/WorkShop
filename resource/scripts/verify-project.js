@@ -91,16 +91,36 @@ async function reqLocal(method, urlPath, { body, headers = {} } = {}) {
   return { status: res.statusCode, json, text: res.body, headers: { get: (k) => (res.headers || {})[k] ?? (res.headers || {})[k.toLowerCase()] } };
 }
 
+// 【多团队 2026-10-27】匿名写入已关闭（seam A 修复）→ 凡写入都必须带登录令牌。
+// 令牌从 WORKSHOP_ADMIN_NAME / WORKSHOP_ADMIN_PASS 换得；拿不到就如实 FAIL（不静默放行）。
+let AUTH_HEADERS = {};
+
 async function req(method, urlPath, opts = {}) {
   if (LOCAL) return reqLocal(method, urlPath, opts);
   const url = API_BASE + urlPath;
-  const opt = { method, headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) } };
+  const opt = { method, headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS, ...(opts.headers || {}) } };
   if (opts.body != null) opt.body = JSON.stringify(opts.body);
   const res = await fetch(url, opt);
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch (e) { /* 非 JSON 保留原文 */ }
   return { status: res.status, json, text, headers: res.headers };
+}
+
+// 换登录令牌（仅线上模式用；--local 的 V3 只打错误分支，鉴权前就返回 400/401，不需要令牌）
+async function loginForWrite() {
+  const name = process.env.WORKSHOP_ADMIN_NAME || '';
+  const pass = process.env.WORKSHOP_ADMIN_PASS || '';
+  if (!name || !pass) {
+    return { ok: false, why: '缺少 WORKSHOP_ADMIN_NAME / WORKSHOP_ADMIN_PASS（匿名写入已关闭，写操作必须登录）' };
+  }
+  const r = await req('POST', '/api/items?_action=login', { body: { name, passcode: pass } });
+  const tok = r.json && r.json.ok && r.json.data && r.json.data.token;
+  if (!tok) {
+    return { ok: false, why: `管理员登录失败 HTTP ${r.status} · ${(r.json && r.json.error && r.json.error.message) || r.text.slice(0, 60)}` };
+  }
+  AUTH_HEADERS = { 'X-Member-Token': tok };
+  return { ok: true };
 }
 
 // ———————————————— 静态检查小工具 ————————————————
@@ -410,20 +430,33 @@ function v10() {
   let createdId = null;
   if (OFFLINE) { skip('V3', '错误响应 HTTP 状态', '离线模式'); skip('V4', '写入契约+幂等', '离线模式'); skip('V5', '删除闸门', '离线模式'); }
   else {
-    if (want('V3')) { try { await v3(); } catch (e) { check('V3', '错误响应 HTTP 状态', false, '请求异常：' + e.message); } }
-    if (LOCAL) {
-      // 本地直调模式下，V4/V5 的"正常路径"需要真连库，本地凭据无效会误报；
-      // 本模式只用 V3 验证「错误分支的状态码」，故跳过 V4/V5（它们在线上模式里正常跑）。
-      skip('V4', '写入契约+幂等', '--local 模式：正常写入需真连库，本地不验（见线上模式）');
-      skip('V5', '删除闸门', '--local 模式：同上');
+    // 写操作先换令牌：2026-10-27 起匿名写入已关闭（seam A 修复），不带令牌一律 401。
+    let auth = { ok: true };
+    if (!LOCAL) {
+      auth = await loginForWrite();
+      if (auth.ok) check('V0', '写操作登录（管理员）', true, '已取得 X-Member-Token');
+      else check('V0', '写操作登录（管理员）', false, auth.why);
+    }
+    if (!auth.ok) {
+      skip('V3', '错误响应 HTTP 状态', '未取得登录令牌：写请求会一律 401，先修 V0');
+      skip('V4', '写入契约+幂等', '同上');
+      skip('V5', '删除闸门', '同上');
     } else {
-      if (want('V4') || want('V5')) {
-        try {
-          const r4 = await v4();
-          createdId = r4.id;
-        } catch (e) { check('V4a', '写入契约', false, '请求异常：' + e.message); }
+      if (want('V3')) { try { await v3(); } catch (e) { check('V3', '错误响应 HTTP 状态', false, '请求异常：' + e.message); } }
+      if (LOCAL) {
+        // 本地直调模式下，V4/V5 的"正常路径"需要真连库，本地凭据无效会误报；
+        // 本模式只用 V3 验证「错误分支的状态码」，故跳过 V4/V5（它们在线上模式里正常跑）。
+        skip('V4', '写入契约+幂等', '--local 模式：正常写入需真连库，本地不验（见线上模式）');
+        skip('V5', '删除闸门', '--local 模式：同上');
+      } else {
+        if (want('V4') || want('V5')) {
+          try {
+            const r4 = await v4();
+            createdId = r4.id;
+          } catch (e) { check('V4a', '写入契约', false, '请求异常：' + e.message); }
+        }
+        if (want('V5')) { try { await v5(createdId); } catch (e) { check('V5a', '删除闸门', false, '请求异常：' + e.message); } }
       }
-      if (want('V5')) { try { await v5(createdId); } catch (e) { check('V5a', '删除闸门', false, '请求异常：' + e.message); } }
     }
   }
 
