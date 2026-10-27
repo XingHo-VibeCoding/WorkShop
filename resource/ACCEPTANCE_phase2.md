@@ -149,8 +149,63 @@
 
 | 项 | 内容 |
 |---|---|
-| 版本 | v1.1（tag `v1.1`） |
+| 版本 | v1.1 —— **⏳ tag 尚未打**（用户 2026-10-27 决定：等 P13 真人试运行完再打，见 §七） |
+| 代码基线 | `bf22bd3`（PLAN 收官 + 设想池 + 回滚增量）｜功能提交 `12601c4` / `872d920` |
 | 相比 v1.0 新增 | 多人身份与归属、四类权限、腾讯会议方案①入会信息、管理员 UI（改角色/重置口令/添加成员）、自助改口令、在线人数心跳 |
 | 公开入口 | `https://workshop-workshop-d4g02a7z81ff51a63.webapps.tcloudbase.com` |
-| 回滚 | 见 `ROLLBACK.md`（安全回退，禁 `reset --hard`） |
+| 回滚 | 见 `ROLLBACK.md`（安全回退，禁 `reset --hard`；**v1.1 增量见该文件 §9**） |
 | 部署前置 | 每次改后端必须重传 items 函数（依赖 6 文件全传）+ 跑 `verify-project.js` |
+
+---
+
+## 七、打 tag 清单（P13 真人试运行完 → 照抄执行）
+
+> 唯一未闭环的自动项就是这次打 tag。前面的功能、文档、验收、部署**全部已收口**，不用担心漏。
+
+### 第 0 步：确认 P13 结论
+
+打开 `resource/trial_phase2.md` 的 D 段回填表，把真人试用结果填完。两种走向：
+
+- **无阻塞问题** → 直接第 1 步
+- **发现阻塞问题** → 先修（问题记进 §四遗留清单），修完重跑验收，再回第 1 步。**别带病打 tag**
+
+### 第 1 步：跑一遍收官三连（确认修完没弄坏别的）
+
+```bash
+node resource/scripts/verify-admin_phase2.js          # 期望：通过 65 · 失败 0
+node resource/scripts/verify-collab_phase2.js         # 期望：15 通过 0 失败（需账号环境变量）
+node resource/scripts/verify-project.js --offline     # 期望：8 PASS / 0 FAIL / 7 SKIP
+```
+
+### 第 2 步：全绿后打 tag
+
+```bash
+git tag -a v1.1 -m "WorkShop v1.1 阶段二：多人协作 + 权限 + 管理员 + 口令体系
+
+P1–P14 技术项 14/14 完成；P13 真人双人试用已执行（结论见 resource/trial_phase2.md D 段）。
+验收：离线 65 / 线上 26 / 协作 15 / 基线 8 / 集成 15。
+三主线：M1 多人协作闭环 · M2 会议预约闭环（方案①）· M3 腾讯文档导出仅 503 占位。
+回滚：见 ROLLBACK.md（v1.1 增量在 §9）。"
+git tag -l        # 确认 v1.0 与 v1.1 并存
+```
+
+### 第 3 步：推送（本机 TLS 常掐断，失败就隔几分钟再试，别循环猛试）
+
+```bash
+git push origin main --tags
+```
+
+### 第 4 步：推完告诉 AI 一句话「v1.1 已推」
+
+我会把 `ACCEPTANCE_phase2.md` §六 的「⏳ tag 尚未打」改成已发布状态，并更新长期记忆里的版本行。
+
+### 可选：清理验收账号
+
+库里现有 `验收甲`(id=7) / `验收乙`(id=8) / `验收丙-L` / `P9测试A` / `P9测试B` 均为测试号，`张三`(id=2, admin) 是你的正式号。要清就走控制台 SQL：
+
+```sql
+DELETE FROM members_phase2
+WHERE display_name IN ('验收甲','验收乙','验收丙-L','P9测试A','P9测试B');
+```
+
+> ⚠️ 清完这些账号，`verify-admin_phase2.js --live` 和 `verify-collab_phase2.js` 就跑不了了（缺 member/readonly 账号）。**建议留到彻底不再需要回归测试时再清**，或者清完记得留一个 member + 一个 readonly 备用。
