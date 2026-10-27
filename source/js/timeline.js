@@ -115,7 +115,8 @@ function setState(s, msg) {
     showGlobalState(null); showViews(); renderCurrentView();
   }
   const sync = document.getElementById('stat-sync');
-  if (sync) { sync.textContent = '同步状态：公网接口已连接（CloudBase items 表）'; sync.dataset.state = s; }
+  // 【实时协作 2026-10-27】如实标注自动同步节奏：用户看底栏就知道"别人改了多久会自动出现"
+  if (sync) { sync.textContent = '同步状态：公网接口已连接（CloudBase）· 自动同步 15s'; sync.dataset.state = s; }
 }
 
 // 【阶段二 P9】只读身份：隐藏新建按钮（后端仍是最终审防线）；isReadOnly 供保存/删除多处复用
@@ -294,6 +295,17 @@ let items = [];
 let MEMBERS_CACHE = [];  // 【阶段二 P11】成员列表缓存（含 meetingNo/meetingUrl），供卡片解析归属成员的默认会议号
 // [Day 11] 已删除项 id 集合：种子数据每次切周会被 loadItems 重灌，靠此集合让删除跨周持久（仅内存态，刷新重置）
 const deletedIds = new Set();
+
+// ===== 【阶段二 实时协作 2026-10-27】自动同步状态 =====
+// 背景：此前数据只在「初次加载 / 切周 / 手动点刷新」时拉取，A 新建后 B 必须刷新才看得到。
+// 方案：15s 静默轮询 + 签名比对，只有服务端真的变了才重绘（详见文件后部 syncTick）。
+let _syncSig = '';         // 上次已应用的数据签名（id + 版本号）
+let _syncInited = false;   // 是否已建立基线（首轮只记基线，不重绘）
+let _syncPending = false;  // 用户填表期间检测到变更 → 待补应用
+let _syncing = false;      // 防叠加：上一轮未结束不发起下一轮
+let _syncTimer = 0;
+let _syncSuppressToast = false;  // 一次性抑制：已提示"事项被删除"就不再补"已同步"
+const SYNC_INTERVAL = 15000;     // 自动同步间隔（用户 2026-10-27 拍板 15s）
 
 // =================== [Day 12] 筛选状态：类型 + 关键词（纯前端过滤，不依赖后端）===================
 // frontend-guidelines §2: 筛选不改变类型色语义；§7: 控件 aria-label 由 HTML 提供、键盘可达
@@ -982,6 +994,7 @@ function showDetail(item) {
   if (!item) {
     body.innerHTML = `<p class="detail-empty">点击时间线上的事项查看详情，或点「+ 新建」添加。底部可切换工作/日常/总表。</p>${legendHTML()}`;
     closeDetailDrawer();
+    flushPendingSync();   // 【实时协作】表单可能刚被取消/关闭 → 把挂起的变更补上
     return;
   }
   const m = markOf(item);
@@ -1016,6 +1029,7 @@ function showDetail(item) {
     const db = document.getElementById('btn-delete'); if (db) db.hidden = true;
   }
   openDetailDrawer(); // 移动端滑出底部抽屉（桌面端 .open 为空操作）
+  flushPendingSync(); // 【实时协作】从表单切到详情 = 表单已关闭，补应用挂起的变更
 }
 
 async function renderForm(existing) {
@@ -1468,6 +1482,10 @@ function afterMutation(backToEmpty) {
   setState(hasWeek ? 'success' : 'empty');
   if (!hasWeek) showDetail(null);
   else if (backToEmpty) showDetail(null);
+  // 【实时协作】自己刚写入 → 用本地最新态刷新基线，否则下一轮会把自己的改动
+  // 误判成"他人的改动"而弹错提示。有挂起变更时不覆盖基线（留给 flush 去发现并提示）。
+  if (!_syncPending) { _syncSig = dataSig(items); _syncInited = true; }
+  flushPendingSync(); // 自己的写入已落库 → 把填表期间他人攒下的变更补上
 }
 
 // ---- 预留接口（今日不实装）----
@@ -1528,6 +1546,11 @@ async function bootstrap() {
   try {
     const data = await loadItems(currentOffset);
     items = data;
+    // 【实时协作】每次权威加载（首屏/切周/手动刷新）都重置同步基线，
+    // 否则若轮询先于 bootstrap 落库，会把较新的签名当基线 → 后续改动被误判为"没变"
+    _syncSig = dataSig(data);
+    _syncInited = true;
+    _syncPending = false;
     setState(data.length ? 'success' : 'empty');
     // 【阶段二 P11】缓存成员列表（含 meetingNo/meetingUrl），供卡片解析归属成员的默认会议号
     try { MEMBERS_CACHE = (window.Auth && typeof window.Auth.members === 'function') ? await window.Auth.members() : []; } catch (_) { MEMBERS_CACHE = []; }
@@ -1546,6 +1569,8 @@ initSheetDrag();   // [Day 25] 绑定移动端副栏拖动手柄（桌面端内�
 bootstrap();
 // 【阶段二 在线人数 2026-10-18】启动心跳（匿名也跑：只上报可见性，不记心跳）
 startHeartbeat();
+// 【阶段二 实时协作 2026-10-27】启动自动同步（15s 静默轮询，有人改动自动出现在你屏幕上）
+startAutoSync();
 
 // =================== [Day 9] 设置系统（实装） ===================
 // 白字对比校验：WCAG AA 要求白字 on 背景 ≥4.5:1，防止把类型色调回不达标浅色
@@ -1881,6 +1906,96 @@ async function heartbeatTick() {
 function startHeartbeat() {
   heartbeatTick();                 // 立即来一次，不必等 30s
   setInterval(heartbeatTick, 30000);
+}
+
+// ============ 【阶段二 实时协作 2026-10-27】自动同步 ============
+/* 解决的问题：A 新建日程后，B 必须手动刷新才能看到（用户实测反馈）。
+   做法：15s 拉一次"当前周"数据（周范围与 loadItems 一致，payload 很小），
+        用「id + 版本号」拼签名比对，没变就一个 DOM 都不碰。
+   三条保护（都是踩过/想过才写的）：
+     ① 填表中不打断——新建/编辑表单渲染在 #detail-body 里，重绘详情会冲掉用户输入
+     ② 页面隐藏时暂停——切走标签页就停拉取，省云函数配额；切回来立刻补一次
+     ③ 正在看的事项被他人删了——主动退出详情并说明，别让用户对着幽灵数据点编辑
+   失败静默：网络抖动不弹错误、保留现有数据，下一轮自然恢复（与心跳同一套哲学）。 */
+
+// 签名：id + updatedAtRaw（P9 起的并发版本号）。新增/删除/改任一字段都会变。
+// 排序后再拼 → 与返回顺序无关，避免"顺序抖动"造成假变更。
+function dataSig(list) {
+  return list.map(it => `${it.id}:${it.updatedAtRaw || ''}`).sort().join('|');
+}
+
+// 用户此刻是否在填表（表单是动态插入 #detail-body 的，用表单 id 判断最准）
+function isFormOpen() {
+  return !!document.getElementById('item-form');
+}
+
+async function syncTick(opts) {
+  const force = !!(opts && opts.force);
+  if (_syncing) return;                        // 弱网时防堆积：上一轮没回来就不发新的
+  if (document.hidden) return;                 // ② 页面不可见 → 暂停
+  if (isFormOpen() && !force) { _syncPending = true; return; }  // ① 填表中 → 挂起，等关闭后补
+
+  _syncing = true;
+  try {
+    const data = await loadItems(currentOffset);
+    const sig = dataSig(data);
+
+    if (!_syncInited) { _syncInited = true; _syncSig = sig; return; }  // 首轮只建基线
+    if (sig === _syncSig) return;              // 没变 → 什么都不做（无闪屏、不丢选中）
+
+    _syncSig = sig;
+    _syncPending = false;
+
+    // 记录"我正在看哪一条"，用于判断它是否还在、是否被改
+    const watchedId = currentItem ? currentItem.id : null;
+    // 保住滚动位置：重绘 #timeline 后浏览器可能跳回顶部
+    const tl = document.getElementById('timeline');
+    const scrolledTop = tl ? tl.scrollTop : 0;
+
+    items = data;
+    const monday = mondayOf(currentOffset), sunday = addDays(monday, 6);
+    const hasWeek = items.some(it => it.start >= monday && it.start <= sunday);
+    // 用 setState 统一驱动重绘（它内部走 renderCurrentView → render）。
+    // 别在这里再单独调一次 render()——那样每次同步会重绘两遍（首版就是这么写的，已修正）。
+    setState(hasWeek ? 'success' : 'empty');
+    applyRoleUI();
+    if (tl) tl.scrollTop = scrolledTop;
+
+    if (watchedId != null) {
+      const fresh = items.find(it => String(it.id) === String(watchedId));
+      if (fresh) {
+        // 静默换成最新版（他人可能刚改了标题/时间）；仅当内容确实变了才重绘详情
+        const cur = currentItem;
+        const changed = !cur || cur.title !== fresh.title || cur.startTime !== fresh.startTime
+          || cur.endTime !== fresh.endTime || cur.updatedAtRaw !== fresh.updatedAtRaw;
+        if (changed) showDetail(fresh);
+      } else if (!isFormOpen()) {
+        showDetail(null);
+        showToast('你正在看的事项已被他人删除');
+        _syncSuppressToast = true;             // 下面那次统一提示就别重复了
+      }
+    }
+    if (!_syncSuppressToast) showToast('已同步他人的最新改动');
+    _syncSuppressToast = false;
+  } catch (_) {
+    /* 静默：不打扰用户，保留现有数据 */
+  } finally {
+    _syncing = false;
+  }
+}
+
+// 表单关闭/保存成功后补一次：把填表期间攒下的变更应用掉
+// （不加这个，用户一填表就会一直挂起，直到下一次别人改动才恢复）
+function flushPendingSync() {
+  if (!_syncPending) return;
+  setTimeout(() => { syncTick({ force: true }); }, 500);  // 留 500ms 让保存/关闭的 DOM 收尾
+}
+
+function startAutoSync() {
+  syncTick();                                  // 立即建基线（与 bootstrap 抢跑也无害，bootstrap 会重置）
+  _syncTimer = setInterval(() => { syncTick(); }, SYNC_INTERVAL);
+  // 切回标签页立刻补一次，不用等下一个 15s
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) syncTick(); });
 }
 
 // 部门/标记变更后：实时刷新时间线 + 当前详情
