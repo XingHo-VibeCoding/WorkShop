@@ -1,6 +1,6 @@
 # WorkShop 阶段二验收表 · v1.1
 
-> 验收日期：2026-10-26｜验收人：周国玮（人工项）+ 北辰（自动化验收）
+> 验收日期：2026-10-26（首轮）/ 2026-10-27（多团队隔离增量）｜验收人：周国玮（人工项）+ 北辰（自动化验收）
 > 上游依据：`PLAN_phase2.md`（P1–P14）｜验收口径：14 天表逐项 + M1/M2/M3 三主线 + 红线「不破坏 v1.0 线上」
 > 生产域名：`https://workshop-workshop-d4g02a7z81ff51a63.webapps.tcloudbase.com`
 > 环境：CloudBase `workshop-d4g02a7z81ff51a63`（体验版，到期 2027-03-27）
@@ -11,10 +11,11 @@
 
 | 维度 | 结果 |
 |---|---|
-| 自动化验收 | **106 项全过 / 0 失败**（`verify-admin_phase2.js --live` 91 + `verify-collab_phase2.js` 15） |
-| 项目基线 | **8 PASS / 0 FAIL / 7 SKIP**（`verify-project.js --offline`，V10 跨脚本重名通过） |
+| 自动化验收 | **144 项全过 / 0 失败**（`verify-admin_phase2.js --live` 104 + `verify-collab_phase2.js` 15 + `verify-tenancy_phase2.js` 25） |
+| 项目基线 | **24 PASS / 0 FAIL / 1 SKIP**（`verify-project.js` 线上模式；`--offline` 为 8 PASS / 0 FAIL / 7 SKIP） |
 | v1.0 红线 | ✅ 未破坏：旧端点数据正常、v1.0 归档可回滚（`ROLLBACK.md`） |
 | 三条主线 | M1 多人协作 ✅ 闭环｜M2 会议预约 ✅ 闭环（方案①）｜M3 腾讯文档导出 ✅ 按决策 B 完成「预留」（接口骨架 + 导出按钮 + 503 空实现，本阶段不做实时同步） |
+| 多团队隔离（多租户） | ✅ **已落地**（2026-10-27）：不同团队独立日程表、互不互通，四红线 25 项线上验收全过 |
 | P13 双人真机试用 | ⚠️ **技术侧已验（15 项全过）/ 真人观察未执行**——唯一未闭环项，脚本与记录表齐备 |
 
 ---
@@ -40,7 +41,7 @@
 
 ---
 
-## 三、本轮（2026-10-18 ~ 10-26）新增功能验收明细
+## 三、本轮（2026-10-18 ~ 10-27）新增功能验收明细
 
 ### 3.1 管理员 UI 一期（seam C 落地）
 
@@ -128,17 +129,84 @@
 
 ---
 
+### 3.7 多团队隔离（多租户）· 2026-10-27 晚（用户需求「封装功能」）
+
+**用户需求**：「将这些内容进行封装，使不同团队能够具有独立的日程表且不允许互通。」
+**拍板三项**：匿名只读默认团队（写入必须登录）／团队码可选（登录时可不填）／**全都做（含邀请码注册）**。
+
+**数据层**（`db/schema_phase2.sql`，幂等可重跑）：
+
+| 改动 | 内容 |
+|---|---|
+| 新表 `teams_phase2` | `id / name / join_code UNIQUE / note`；`join_code` 既是登录定位码也是**邀请码** |
+| 三表加列 | `items` / `members_phase2` / `audit_phase2` 各加 `team_id` + 索引 |
+| 唯一约束 | `UNIQUE(team_id, display_name) WHERE display_name <> ''`——**同团队内不重名，跨团队可以同名** |
+| 存量回填 | 全部归入默认团队 `WS-DEFAULT`（名字「默认团队」），老数据零迁移成本 |
+| 留痕白名单 | `chk_audit_action` 扩至 9 个动作（新增 `create_team`） |
+
+**隔离的四道闸（这是整个功能的核心）**：
+
+1. **缺参数就抛错**——`db.requireTeamId()`，14 个数据层函数强制要求 `teamId`。
+   ★ 关键取舍：**绝不做成"不传就不过滤"**。那样一处漏传就静默返回全库，跨团队泄露且**没有报错、最难发现**；宁可抛错 500 也不静默放行。
+2. **三重过滤**——`findItemById` / `updateItem` / `deleteItem` 一律 `id + team_id` 双条件；跨团队 id 命中 0 行 → **404**（不用 403：不泄露"存在但无权"）。
+3. **剥掉 `patch.team_id`**——否则一次 PATCH 就能把日程"搬"到别人团队。
+4. **令牌带 `tid`**——payload 变 `{mid,name,role,tid,exp}`；老令牌无 `tid` → 按 `mid` 回查库补齐（上线不必逼全员重登）；**查不到团队 = 未登录**（fail-closed）。
+
+**顺带修掉 seam A（匿名可写）**：新增 `requireWriter()`，一切写操作必须登录；匿名只能读默认团队。这条从 10-26 起就挂在遗留清单里，此次一并关闭。
+
+**其他语义**：登录 `teamCode` 可选（不填全局找、唯一命中即登录，跨团队重名才 409）；注册走邀请码，**团队第一个成员自动 admin**（否则新团队永远只能靠 SQL 管人）；**建团队不搬人**（一个人只属于一个团队，创建者留在原团队，新团队由首位加入者当管理员）。
+
+**部署顺序铁律**：**先跑 schema SQL，再传云函数**。反了 → 新函数按 `team_id` 过滤而列还不存在 → **全表 500**；先 SQL 后函数则安全（旧函数不写 `team_id`，新列可空）。
+
+**验收（2026-10-27 23:45，全部线上真实接口）**：
+
+| 脚本 | 结果 | 说明 |
+|---|---|---|
+| `verify-tenancy_phase2.js`（新） | **25 / 0** | 四红线：看不到（列表没有）／改不了（PATCH 404）／删不了（DELETE 404）／管不了（跨团队 setRole、resetPasscode 全 404）；外加成员名单隔离、团队信息隔离、匿名只读+写 401、本团队不误伤 |
+| `verify-admin_phase2.js --live` | **104 / 0**（离线 78 + 线上 26） | 含 13 项「缺 teamId 必须抛错」不变量 |
+| `verify-project.js` | **24 PASS / 0 FAIL / 1 SKIP** | 新增 `V0 写操作登录` 判定点 |
+| `verify-sync_phase2.js` | **13 / 0** | 自动同步在登录态下照常 |
+| `verify-collab_phase2.js` | **15 / 0** | 管理员代管、只读拦截未误伤 |
+| `vm-smoke_phase2.js` / `sync-logic_phase2.js` | **23 / 0**、**22 / 0** | 前端脚本加载与同步逻辑 |
+
+**部署一致性**：线上 `index.html` / `js/timeline.js` / `js/login_phase2.js` / `js/router.js` 四个文件与本地**去 CRLF 后 md5 逐字一致**（`60cc15ca…` / `a92a7b8d…` / `58a8b017…` / `8ae97bb4…`）。
+
+**本轮踩到的三个坑（都是测试侧，不是产品缺陷）**：
+
+1. **验收脚本不幂等**——`addMember` 用写死的名字「验收丙-L」建成员，第二次跑必得 409 被误判成产品失败。已改成 `验收丙-L-<时间戳>`。**测试脚本自己也得能重复跑**。
+2. **关闭匿名写入会打破两个旧脚本**——`verify-project.js` 的 V3/V4/V5、`verify-sync_phase2.js` 全用匿名写。这不是回归，是**契约变更**：两个脚本已改为先登录再写，`verify-project.js` 还因此多了一个 `V0` 判定点（登录失败会如实 FAIL，不静默跳过）。
+3. **验收时误改了一条真实数据**——探测「member 能否改他人日程」时对真实 id=5 发了 PATCH；它属 v1.0 无归属老数据，`acl` 对 `ownerMemberId == null` 按设计放行（legacy 兼容），于是 note 被改成 `__probe__`。**当场改回 `111` 并回读核对**。教训：**验收探针不要拿真实 id 当靶子，改自己新建的那条**。
+
+**测试残留（需控制台 SQL 清理，一次即可）**：
+
+```sql
+-- 团队：验收团队A/B（脚本建的，无删除接口）
+DELETE FROM items         WHERE team_id IN (SELECT id FROM teams_phase2 WHERE name LIKE '验收团队_-%');
+DELETE FROM audit_phase2  WHERE team_id IN (SELECT id FROM teams_phase2 WHERE name LIKE '验收团队_-%');
+DELETE FROM members_phase2 WHERE team_id IN (SELECT id FROM teams_phase2 WHERE name LIKE '验收团队_-%');
+DELETE FROM teams_phase2  WHERE name LIKE '验收团队_-%';
+
+-- 成员：本轮验收临时账号（id 10/11/12/13/14/15/18/19）
+DELETE FROM audit_phase2   WHERE actor_id IN (10,11,12,13,14,15,18,19) OR target_id IN (10,11,12,13,14,15,18,19);
+DELETE FROM members_phase2 WHERE id IN (10,11,12,13,14,15,18,19);
+```
+
+> 正式号只有 `张三`(id=2, admin) 与 `小小周`(id=3, admin)；`只读测试`(4)、`P9测试A`(5)、`P9测试B`(6)、`验收甲`(7)、`验收乙`(8) 是既往回归用账号，**建议保留**（`verify-admin --live` 和 `verify-collab` 依赖 member + readonly 账号）。
+
+---
+
 ## 四、遗留与未完成（诚实清单）
 
 | 项 | 状态 | 说明 / 下一步 |
 |---|---|---|
 | **P13 真人观察** | 未执行 | 技术侧已验（15 项）；**真人部分**需你按 `resource/trial_phase2.md` 跑 A 段五步（可用 C9 降级：两个浏览器分饰两角），跑完回填 D 段。这是阶段二唯一未闭环项 |
 | **腾讯文档真实导出** | 未实现（预期内） | 阶段二按决策 B 只做预留；真实现需腾讯文档 Connector 授权 + 定导出粒度，列入 v1.2 |
-| **实时协作** | 未做（轮询） | 他人改动需刷新/轮询可见；v1.2 池子（WebSocket / 真轮询） |
+| **实时协作** | 未做（轮询） | 他人改动需等 15s 轮询可见（不再是"必须刷新"）；真 WebSocket 列入 v1.2 |
 | **真调腾讯会议建会 API** | v1.2 池子 | 需专业版+高级账号 |
-| **多团队隔离（多租户）** | 设想池 | 你 10-22 提出：不同团队独立日程表、互不互通。属架构级演进（数据加 team 维度 + 查询全过滤 + 登录态绑团队），未立项 |
-| **`git push`** | 未推 | 本机 TLS 掐断，需你手动 push（本地累计约 11 个提交） |
-| **验收测试账号** | 可留可清 | 库里 `验收甲`(7)/`验收乙`(8)/`验收丙-L`/`P9测试A`(5)/`P9测试B`(6)；清理 SQL：`DELETE FROM members_phase2 WHERE display_name IN ('验收甲','验收乙','验收丙-L','P9测试A','P9测试B');` |
+| **多团队隔离（多租户）** | ✅ **已完成（10-27）** | 见 §3.7。`teams_phase2` + 三表 `team_id` + `requireTeamId` 硬约束；线上四红线 25 项全过 |
+| **团队管理（改名/删团队/移出成员）** | 未做 | 本期只做「建团队 + 用邀请码加入 + 隔离」；删除团队无接口，清理只能走 SQL。真需要时属 v1.2 |
+| **`git push`** | 未推 | 本机 TLS 掐断，需你手动 push（本地累计 9 个提交未推） |
+| **验收测试账号** | 可留可清 | 本轮新增临时账号清单与清理 SQL 见 §3.7 末尾；**`只读测试`(4)/`P9测试A`(5)/`P9测试B`(6)/`验收甲`(7)/`验收乙`(8) 建议保留**，`--live` 回归要用 |
 
 ---
 
@@ -193,13 +261,29 @@
 - **无阻塞问题** → 直接第 1 步
 - **发现阻塞问题** → 先修（问题记进 §四遗留清单），修完重跑验收，再回第 1 步。**别带病打 tag**
 
-### 第 1 步：跑一遍收官三连（确认修完没弄坏别的）
+### 第 1 步：跑一遍收官（确认修完没弄坏别的）
+
+凭据放 `.env.verify`（已被 `.gitignore` 的 `.env.*` 忽略，**别提交**）：
+
+```
+WORKSHOP_ADMIN_NAME=张三
+WORKSHOP_ADMIN_PASS=<你的口令>
+WORKSHOP_TEST_MEMBER=<一名 member>
+WORKSHOP_TEST_PASS=<其口令>
+WORKSHOP_RO_MEMBER=<一名 readonly>
+WORKSHOP_RO_PASS=<其口令>
+```
 
 ```bash
-node resource/scripts/verify-admin_phase2.js          # 期望：通过 65 · 失败 0
-node resource/scripts/verify-collab_phase2.js         # 期望：15 通过 0 失败（需账号环境变量）
-node resource/scripts/verify-project.js --offline     # 期望：8 PASS / 0 FAIL / 7 SKIP
+set -a; . ./.env.verify; set +a
+node resource/scripts/verify-admin_phase2.js --live    # 期望：通过 104 · 失败 0（离线 78 + 线上 26）
+node resource/scripts/verify-collab_phase2.js          # 期望：15 通过 0 失败
+node resource/scripts/verify-tenancy_phase2.js         # 期望：25 通过 0 失败（跨团队四红线）
+node resource/scripts/verify-sync_phase2.js            # 期望：13 通过 0 失败
+node resource/scripts/verify-project.js                # 期望：24 PASS / 0 FAIL / 1 SKIP
 ```
+
+> 缺 member / readonly 账号时，对应几项会**如实标注跳过**（不会假绿）。跑完记得清理 `verify-tenancy` 打印的「验收团队A/B」测试团队。
 
 ### 第 2 步：全绿后打 tag
 
@@ -207,7 +291,8 @@ node resource/scripts/verify-project.js --offline     # 期望：8 PASS / 0 FAIL
 git tag -a v1.1 -m "WorkShop v1.1 阶段二：多人协作 + 权限 + 管理员 + 口令体系
 
 P1–P14 技术项 14/14 完成；P13 真人双人试用已执行（结论见 resource/trial_phase2.md D 段）。
-验收：离线 65 / 线上 26 / 协作 15 / 基线 8 / 集成 15。
+多团队隔离（多租户）已落地：不同团队独立日程表、互不互通。
+验收：离线 78 / 线上 26 / 协作 15 / 租户 25 / 同步 13 / 基线 24 / 集成 23。
 三主线：M1 多人协作闭环 · M2 会议预约闭环（方案①）· M3 腾讯文档导出仅 503 占位。
 回滚：见 ROLLBACK.md（v1.1 增量在 §9）。"
 git tag -l        # 确认 v1.0 与 v1.1 并存
