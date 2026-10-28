@@ -266,7 +266,28 @@ function applyRoleUI() {
   // 【2026-10-28】解散团队：本团队 admin 或 core（服务端再判一次）
   const disband = document.getElementById('team-disband');
   if (disband) disband.hidden = !(isAdmin() || isCore());
+  // 【2026-10-28】core 跨团队解散：多出团队选择器；admin 只能解散本团队，看不到它
+  const disbandRow = document.getElementById('disband-team-row');
+  if (disbandRow) disbandRow.hidden = !isCore();
+  // 【2026-10-28】底栏团队名：身份变化（登录/登出）即刷新。匿名现在也能拿到默认团队名
+  // （team 端点对匿名返回默认团队），所以不判断登录态，统一拉。
+  updateTeamBadge();
 }
+
+// 【2026-10-28】底栏团队徽标：独立小函数，login_phase2 登录成功后也会调（window.updateTeamBadge）
+async function updateTeamBadge() {
+  const el = document.getElementById('stat-team');
+  if (!el) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/items?_action=team`, {
+      headers: (window.Auth ? window.Auth.withHeaders({}) : {}),
+    });
+    const j = await res.json().catch(() => null);
+    const t = j && j.ok && j.data && j.data.team;
+    el.textContent = `团队：${(t && t.name) || '—'}`;
+  } catch (e) { el.textContent = '团队：—'; }
+}
+window.updateTeamBadge = updateTeamBadge;
 
 // ---- [Day 20] 真实 API 接线：loadItems 从 mock 切换为调用公网接口 ----
 /* API 地址 = CloudBase HTTP 网关默认域名（Day 15 部署，路由 /api/items 在 Day 17 配置）。
@@ -1764,6 +1785,8 @@ async function exportMine() {
   const btn = document.getElementById('btn-export-mine');
   const hint = document.getElementById('export-mine-hint');
   if (btn) btn.disabled = true;
+  // 【2026-10-28】立即反馈：拉全量 + 生成文件要一两秒，别让用户对着没动静的按钮猜
+  showToast('正在导出你的日程…');
   try {
     // 全量范围（与导出模块一致）：不依赖"无参数默认全量"的实现细节
     const url = `${API_BASE}/api/items?start=2000-01-01 00:00&end=2100-12-31 23:59`;
@@ -1806,27 +1829,52 @@ async function disbandTeam() {
   if (errEl) errEl.hidden = true;
 
   if (!isAdmin() && !isCore()) { showErr('只有团队管理员可以解散团队'); return; }
+
+  // 【2026-10-28】core 可跨团队：目标团队取选择器；admin 固定本团队
+  const sel = document.getElementById('disband-team-select');
+  let targetTeamName = '';
+  let targetTeamId = undefined;
+  if (isCore() && sel && sel.value) {
+    const opt = sel.selectedOptions[0];
+    targetTeamName = (opt && opt.dataset.name || '').trim();
+    targetTeamId = Number(sel.value) || undefined;
+  } else {
+    const teamNameEl = document.getElementById('team-name');
+    targetTeamName = (teamNameEl && teamNameEl.textContent || '').trim();
+  }
+
   const typed = (input && input.value || '').trim();
-  const teamNameEl = document.getElementById('team-name');
-  const realName = (teamNameEl && teamNameEl.textContent || '').trim();
-  if (!typed) { showErr(`请输入团队名「${realName}」以确认`); if (input) input.focus(); return; }
-  if (typed !== realName) { showErr('输入的团队名不一致，已取消（日程没有任何改动）'); return; }
+  if (!typed) { showErr(`请输入团队名「${targetTeamName}」以确认`); if (input) input.focus(); return; }
+  if (typed !== targetTeamName) { showErr('输入的团队名不一致，已取消（日程没有任何改动）'); return; }
 
   // 二次确认：即使名字输对了，也要再点一次 —— 这是不可恢复操作里唯一值钱的一步
-  if (!window.confirm(`最后一次确认：解散「${realName}」？\n\n本团队的全部日程与成员账号会被永久删除，无法恢复。\n请确认每位成员都已导出自己的日程。`)) return;
+  if (!window.confirm(`最后一次确认：解散「${targetTeamName}」？\n\n该团队的全部日程与成员账号会被永久删除，无法恢复。\n解散时系统会自动下载一份完整日程备份，请转交该团队管理员。`)) return;
 
-  if (btn) btn.disabled = true;
+  if (btn) { btn.disabled = true; btn.textContent = '正在解散…'; }
   try {
-    const data = await apiMutate('POST', `${API_BASE}/api/items?_action=deleteteam`, { confirmName: typed });
+    showToast('正在解散团队（含自动备份导出）…');
+    const data = await apiMutate('POST', `${API_BASE}/api/items?_action=deleteteam`, { confirmName: typed, teamId: targetTeamId });
     const d = (data && data.deleted) || {};
+    const ex = (data && data.export) || null;
+    // 自动备份：无论谁点的解散，文件都落地到操作者手里（文件名注明交给该团队管理员）。
+    // 下载失败不阻断主流程——团队已经删了，把内容提示出来让人手动救。
+    if (ex && ex.content && window.Export2 && typeof window.Export2.download === 'function') {
+      try {
+        window.Export2.download(ex.filename || 'team-backup.json', ex.content, 'application/json');
+        showToast(`团队已解散（日程 ${d.items || 0} 条、成员 ${d.members || 0} 个）。备份文件（${ex.itemCount || 0} 条日程）已自动下载，请转交该团队管理员！`);
+      } catch (dlErr) {
+        alert(`团队已解散，但备份文件自动下载失败：${dlErr.message}\n\n请立即联系技术支持在服务端日志找回数据。`);
+      }
+    } else {
+      showToast(`团队已解散（删除日程 ${d.items || 0} 条、成员 ${d.members || 0} 个）`);
+    }
     // 团队没了，当前令牌已经无意义：就地清掉本地身份，回到匿名只读态
     if (window.Auth && typeof window.Auth.logout === 'function') window.Auth.logout();
     closeSettings();
-    showToast(`团队已解散（删除日程 ${d.items || 0} 条、成员 ${d.members || 0} 个）`);
-    setTimeout(() => location.reload(), 1200);
+    setTimeout(() => location.reload(), 1800);
   } catch (e) {
     showErr('解散失败：' + e.message);
-    if (btn) btn.disabled = false;
+    if (btn) { btn.disabled = false; btn.textContent = '解散团队'; }
   }
 }
 
@@ -2051,8 +2099,19 @@ function computeFreeTime(view) { /* TODO(设想②): 以半小时为单位统计
 document.getElementById('btn-prev-week').addEventListener('click', () => { currentOffset = Math.max(WEEK_MIN, currentOffset - 1); bootstrap(); });
 document.getElementById('btn-next-week').addEventListener('click', () => { currentOffset = Math.min(WEEK_MAX, currentOffset + 1); bootstrap(); });
 // 新建
+// 【2026-10-28 修】两个"点了没反应"的场景：
+// ① 空状态（state='empty'）下整个主视图被空状态层替换，renderForm 渲到 detail-body 里也看不见
+//    ——顶栏新建要先切回 success 态（空状态里的「新建」按钮一直是对的，顶栏这颗漏了）。
+// ② 匿名（未登录）：表单能打开但保存必 401，属于"能填但白填"。直接引导登录，不让他白忙。
 document.getElementById('btn-new').addEventListener('click', () => {
+  const me = (window.Auth && typeof window.Auth.currentMember === 'function') ? window.Auth.currentMember() : null;
+  if (!me) {
+    showToast('请先登录后再新建日程（当前是匿名只读）');
+    if (window.Auth && typeof window.Auth.openLoginModal === 'function') window.Auth.openLoginModal();
+    return;
+  }
   if (isReadOnly()) { showToast('当前身份为只读，无法修改日程'); return; }
+  setState('success');   // 空状态下先恢复主视图，否则表单渲染在看不见的地方
   renderForm(null);
 });
 // 空状态「新建」
@@ -2173,7 +2232,8 @@ function renderSettings() {
     const btnAdd = document.getElementById('btn-add-member');
     if (btnAdd) btnAdd.onclick = submitAddMember;
     // 【2026-10-27 多团队】团队信息 + 建团队（admin 专属）
-    renderTeamBox();
+    // 【2026-10-28】core 也要进这段：看团队信息 + 跨团队解散选择器（?_action=team 对 core 同样可用）
+    if (isAdmin() || isCore()) renderTeamBox();
     const btnTeam = document.getElementById('btn-create-team');
     if (btnTeam) btnTeam.onclick = submitCreateTeam;
     const btnCopy = document.getElementById('btn-copy-team-code');
@@ -2604,8 +2664,27 @@ async function renderTeamBox() {
     const t = (data && data.team) || {};
     if (nameEl) nameEl.textContent = t.name || '—';
     if (codeEl) codeEl.textContent = t.joinCode || '（仅管理员可见）';
+    // 底栏团队名顺手同一次（设置面板里看到的和底栏应该一致）
+    const badge = document.getElementById('stat-team');
+    if (badge && t.name) badge.textContent = `团队：${t.name}`;
   } catch (e) {
     if (errEl) { errEl.textContent = '读取团队信息失败：' + e.message; errEl.hidden = false; }
+  }
+  // 【2026-10-28】core 跨团队解散：拉全部团队清单填进选择器（服务端 403 兜底，前端拿到啥算啥）
+  const sel = document.getElementById('disband-team-select');
+  if (sel && isCore()) {
+    try {
+      const list = await apiMutate('GET', `${API_BASE}/api/items?_action=teams`);
+      if (Array.isArray(list) && list.length) {
+        sel.innerHTML = list.map(t =>
+          `<option value="${t.id}" data-name="${esc(t.name)}">${esc(t.name)}（日程 ${t.itemCount} · 成员 ${t.memberCount}${t.id === 1 ? ' · 默认' : ''}）</option>`
+        ).join('');
+      } else {
+        sel.innerHTML = '<option value="">（没有可解散的团队）</option>';
+      }
+    } catch (e) {
+      sel.innerHTML = `<option value="">（团队清单加载失败：${esc(e.message)}）</option>`;
+    }
   }
 }
 
@@ -2864,7 +2943,8 @@ function exportData() {
      · 合并，不清空本团队已有日程
      · 未登录直接拦下（2026-10-27 起写操作必须登录），不白发请求 */
 const IMPORT_MAX = 500;   // 单次上限：太多会长时间占用页面，也掩盖单条错误
-const IMPORT_API_TYPES = ['meeting', 'course', 'travel', 'sport', 'life', 'pending'];
+// other 也是服务端合法类型（内置 7 个之一）：不列进来会被下面静默改成 pending，导入结果走样
+const IMPORT_API_TYPES = ['meeting', 'course', 'travel', 'sport', 'life', 'pending', 'other'];
 
 // 开始时间缺结束时间时的兜底：+30 分钟（与拨轮选完自动 +30 的行为一致），跨天则截到 23:59
 function importPlus30(hhmm) {
@@ -2936,7 +3016,13 @@ function normalizeImportItem(raw) {
 function readFileAsText(file) {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
-    r.onload = ev => resolve(String(ev.target.result || ''));
+    r.onload = ev => {
+      // 去 BOM：Windows 记事本存 UTF-8 会带 \uFEFF 头，JSON.parse 会因此报"不是合法的 JSON"，
+      // 用户只会觉得"我的文件明明没问题"——这里替他吃掉，不让他背这个锅
+      let s = String(ev.target.result || '');
+      if (s.charCodeAt(0) === 0xFEFF) s = s.slice(1);
+      resolve(s);
+    };
     r.onerror = () => reject(new Error('读取文件失败（文件可能已被移动或没有读取权限）'));
     r.readAsText(file);
   });
@@ -2970,9 +3056,27 @@ async function importData(file) {
       return;
     }
 
+    // 【2026-10-28】门 2.5：先探一下令牌还有没有效。localStorage 里的登录态不会自己过期，
+    // 但令牌 7 天就失效——不预检的话 500 条逐条发 401，等汇总才发现"登录过期"，白等一场。
+    // （10-28 用户反馈"导入依旧失败"，最可疑的就是这个：页面看是登录的，令牌其实已经死了。）
+    try {
+      const probe = await fetch(`${API_BASE}/api/items?_action=team`, {
+        headers: (window.Auth ? window.Auth.withHeaders({}) : {}),
+      });
+      if (probe.status === 401) {
+        alert('导入失败：你的登录已过期（令牌有效期 7 天）。\n\n请点右上角退出登录，重新登录后再导入。');
+        return;
+      }
+    } catch (e) { /* 探针网络失败不拦路：让后面的逐条请求自己报真实错误 */ }
+
+    // 【2026-10-28】立即反馈：循环逐条发请求期间页面看似没动静（第 1 条最慢要等整轮），
+    // 先把"正在执行"亮出来，结束时再报结果——别让用户对着静止的页面猜。
+    showToast(`正在导入 ${list.length} 条，请稍候…`);
+
     // 门 3：逐条落库。单条失败不影响其余（失败原因逐条汇总给用户，不静默吞）
     let okCount = 0;
     let dupCount = 0;
+    let authFailCount = 0;
     const fails = [];
     for (let i = 0; i < list.length; i++) {
       let local = null;
@@ -2984,6 +3088,7 @@ async function importData(file) {
       } catch (e) {
         // 后端按 title+table+type+start+end+ownerKey 在【本团队内】判重 → 409
         if (e.code === 409) dupCount++;
+        else if (e.code === 401) authFailCount++;   // 令牌中途失效：归成一类单独提示
         else fails.push(`第 ${i + 1} 条「${local.title}」：${e.message}`);
       }
       if ((i + 1) % 10 === 0 && i + 1 < list.length) showToast(`正在导入 ${i + 1}/${list.length}…`);
@@ -2995,8 +3100,10 @@ async function importData(file) {
 
     const lines = [`导入完成：新增 ${okCount} 条`];
     if (dupCount) lines.push(`已存在跳过 ${dupCount} 条`);
+    if (authFailCount) lines.push(`登录过期 ${authFailCount} 条`);
     if (fails.length) lines.push(`失败 ${fails.length} 条`);
     let msg = lines.join('，') + '。';
+    if (authFailCount) msg += '\n\n⚠️ 有请求因登录过期被拒：请退出后重新登录，再导一次（已新增的不会重复）。';
     if (fails.length) msg += '\n\n失败明细（最多显示 5 条）：\n' + fails.slice(0, 5).join('\n');
     alert(msg);
   } catch (err) {

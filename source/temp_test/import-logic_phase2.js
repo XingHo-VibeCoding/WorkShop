@@ -45,6 +45,7 @@ let fileText = '';      // 下一次"读文件"的内容
 let dupTitles = [];     // 这些 title 的 POST 返回 409（模拟后端团队内判重）
 let alerts = [];        // alert 文案
 let toasts = [];
+let probe401 = false;   // 【10-28 新增】令牌预检返回 401（模拟"页面看着登录着，令牌其实过期了"）
 
 // ===== DOM 桩（与 sync-logic_phase2.js 同款，够 render 跑通）=====
 function elStub(id) {
@@ -106,6 +107,7 @@ const sandbox = {
     const u = String(url);
     const method = (opt && opt.method) || 'GET';
     if (method === 'DELETE') { deletes++; return jsonRes({ ok: true, data: null }); }
+    if (probe401 && u.includes('_action=team')) return jsonRes({ ok: false, data: null, error: { code: 401, message: '请先登录' } }, 401);
     if (method === 'POST' && u.includes('/api/items')) {
       const body = JSON.parse((opt && opt.body) || '{}');
       writes.push({ url: u, body });
@@ -249,6 +251,34 @@ const oneItem = JSON.stringify({ version: 1, items: [{ title: '导入A', table: 
   const many = { items: Array.from({ length: 501 }, (_, i) => ({ title: 'x' + i, table: 'work', type: 'meeting', startTime: '2026-10-28 10:00', endTime: '2026-10-28 11:00', ownerKey: 'self' })) };
   await runImport(JSON.stringify(many));
   check('B8 超过 500 条上限 → 拒绝且不发请求', writes.length === 0 && alerts.some(a => /最多导入 500 条/.test(a)), alerts[0] || '无提示');
+
+  // ===== C. 2026-10-28 用户反馈追加：预检 / BOM / 即时提示 / other 类型 =====
+  console.log('\n──────── C. 令牌预检 · BOM · 即时反馈 ────────');
+
+  // C1 令牌过期：页面有"登录态"（localStorage 成员信息在）但令牌 7 天已死。
+  // 必须在发任何 POST 之前就拦下，而不是让 500 条逐个 401 后才在汇总里看到。
+  reset(); setLogged(true); probe401 = true;
+  await runImport(JSON.stringify({ items: [{ title: '预检', table: 'work', type: 'meeting', startTime: '2026-10-28 10:00', endTime: '2026-10-28 11:00', ownerKey: 'self' }] }));
+  check('C1 令牌预检 401 → 一条 POST 都不发', writes.length === 0, '发了 ' + writes.length + ' 条');
+  check('C1 提示登录已过期（而非笼统的失败明细）', alerts.some(a => /登录已过期/.test(a)), alerts[0] || '无提示');
+  probe401 = false;
+
+  // C2 BOM：Windows 记事本存 UTF-8 带 \uFEFF 头，此前 JSON.parse 直接判"不合法"，用户背锅
+  reset(); setLogged(true);
+  await runImport('\uFEFF' + JSON.stringify({ items: [{ title: 'BOM 项', table: 'work', type: 'meeting', startTime: '2026-10-28 10:00', endTime: '2026-10-28 11:00', ownerKey: 'self' }] }));
+  check('C2 带 BOM 的文件正常导入', writes.length === 1 && !alerts.some(a => /失败/.test(a)), JSON.stringify({ posts: writes.length, alert: alerts[0] }));
+
+  // C3 即时反馈：逐条 POST 期间页面不能静止——开始就要有"正在导入"提示（10-28 反馈①）
+  reset(); setLogged(true);
+  // vm 里看不到本文件的闭包变量 → 挂一个共享数组，showToast 往里推，两边看的是同一个对象
+  sandbox.__toastLog = toasts;
+  vm.runInContext('showToast = m => __toastLog.push(String(m))', sandbox);
+  await runImport(JSON.stringify({ items: [{ title: '提示', table: 'work', type: 'meeting', startTime: '2026-10-28 10:00', endTime: '2026-10-28 11:00', ownerKey: 'self' }] }));
+  check('C3 开始即提示「正在导入」', toasts.some(t => /正在导入/.test(t)), JSON.stringify(toasts));
+
+  // C4 other 是服务端合法类型：不得静默改写成 pending（改写会让导入结果走样）
+  const c4 = norm({ title: '其他类型', table: 'work', type: 'other', startTime: '2026-10-28 10:00', endTime: '2026-10-28 11:00', ownerKey: 'self' });
+  check('C4 type=other 原样保留（不兜底成 pending）', c4.type === 'other', c4.type);
 
   console.log('\n通过 ' + pass + ' · 失败 ' + fail);
   process.exit(fail ? 1 : 0);

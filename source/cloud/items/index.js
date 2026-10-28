@@ -282,6 +282,10 @@ async function createItem(event) {
 
   // 2) 取值校验
   const table = String(body.table).trim();
+  // 【2026-10-28 导入兜底】历史词 class/trip 在库里的正名是 course/travel。
+  // 前端 normalizeImportItem 已转换，但老版本页面 / 手写脚本 / 旧导出文件仍可能送来历史词
+  // ——与其回 400 让用户对着一串报错发懵，不如服务端直接认下并归一化（幂等、无歧义）。
+  if (body.type === 'class' || body.type === 'trip') body.type = body.type === 'class' ? 'course' : 'travel';
   const type = String(body.type).trim();
   const ownerKey = String(body.ownerKey).trim();
   if (!TABLE_KINDS.includes(table)) {
@@ -476,6 +480,8 @@ async function patchItem(event) {
     }
     if (k === 'type') {
       v = String(v).trim();
+      // 同上：历史词归一化（10-28 导入兜底）
+      if (v === 'class' || v === 'trip') v = v === 'class' ? 'course' : 'travel';
       if (!(await loadItemTypeCodes()).includes(v)) return { ok: false, data: null, error: { code: 400, message: `事项类型取值无效：${v}` } };
     }
     if (k === 'ownerKey') {
@@ -1236,7 +1242,21 @@ async function deleteTeamEndpoint(event) {
     return { ok: false, data: null, error: { code: 403, message: '只有团队管理员可以解散团队' } };
   }
 
-  const team = await db.findTeamById(actor.teamId);
+  // 【2026-10-28】core 可解散任意团队（不必是成员）；admin 仍只能解散自己团队。
+  // 目标团队由 body.teamId 指定：admin 传了别的团队 ID 也一律忽略（按本团队算），不给提权口子。
+  const isCore = role === 'core';
+  const requestedTeamId = Number(body.teamId);
+  const targetTeamId = (isCore && Number.isInteger(requestedTeamId) && requestedTeamId > 0)
+    ? requestedTeamId
+    : actor.teamId;
+
+  // 【2026-10-28】全站至少保留一个团队：默认团队是匿名只读的落点，删光等于把站点弄瘫
+  const allTeams = await db.listTeams();
+  if (allTeams.length <= 1) {
+    return { ok: false, data: null, error: { code: 400, message: '这是最后一个团队，不允许解散（系统至少要保留一个团队）' } };
+  }
+
+  const team = await db.findTeamById(targetTeamId);
   if (!team) return { ok: false, data: null, error: { code: 404, message: '团队不存在（可能已被解散）' } };
 
   const confirmName = String(body.confirmName || '').trim();
@@ -1247,21 +1267,32 @@ async function deleteTeamEndpoint(event) {
     return { ok: false, data: null, error: { code: 400, message: '输入的团队名不一致，已取消（日程没有任何改动）' } };
   }
 
+  // 【2026-10-28】删除前先拉全量数据：用户拍板"团队解散，自动将日程表导出给该团队 admin"。
+  // 服务端没有向指定用户推送文件的通道，所以做法是：把导出 JSON 随响应带回，
+  // 前端立刻自动下载为文件，文件名与内容都注明"交给该团队管理员"。比删完再想找回强得多。
+  const exportItems = await db.queryItems(
+    { start: '2000-01-01 00:00', end: '2100-12-31 23:59', limit: '5000' },
+    targetTeamId,
+  );
+  const exportMembers = (await db.listMembers(targetTeamId)).map(m => ({
+    id: m.id, displayName: m.displayName, role: m.role,
+  }));
+
   // 先统计再删：删完就查不到了，得先留一份数字给响应和日志
-  const itemCount = await db.countItemsByTeam(actor.teamId);
-  const memberCount = await db.countTeamMembers(actor.teamId);
+  const itemCount = await db.countItemsByTeam(targetTeamId);
+  const memberCount = await db.countTeamMembers(targetTeamId);
 
   // 顺序：items → audit → members → team。反过来的话中途失败会留下
   // "团队没了、数据还在"的幽灵行，那种脏数据最难查。
   let removedItems = 0, removedMembers = 0;
   try {
-    removedItems = await db.deleteByTeam('items', actor.teamId);
-    await db.deleteByTeam('audit_phase2', actor.teamId);
-    removedMembers = await db.deleteByTeam('members_phase2', actor.teamId);
-    await db.deleteTeamById(actor.teamId);
+    removedItems = await db.deleteByTeam('items', targetTeamId);
+    await db.deleteByTeam('audit_phase2', targetTeamId);
+    removedMembers = await db.deleteByTeam('members_phase2', targetTeamId);
+    await db.deleteTeamById(targetTeamId);
   } catch (err) {
     // 级联到一半失败：如实告知，别让用户以为删干净了
-    console.error('[解散团队] 清理中断', { teamId: actor.teamId, removedItems, removedMembers, err: err && err.message });
+    console.error('[解散团队] 清理中断', { teamId: targetTeamId, removedItems, removedMembers, err: err && err.message });
     return {
       ok: false, data: null,
       error: { code: 500, message: `解散未完成：已删除 ${removedItems} 条日程，后续清理失败。请联系管理员在控制台处理（团队尚未删除）` },
@@ -1269,13 +1300,28 @@ async function deleteTeamEndpoint(event) {
   }
 
   // audit 表已随团队清空，留痕只能进运行日志
-  console.log('[解散团队] 完成', { teamId: actor.teamId, teamName: team.name, by: actor.mid, items: removedItems, members: removedMembers });
+  console.log('[解散团队] 完成', { teamId: targetTeamId, teamName: team.name, by: actor.mid, role, items: removedItems, members: removedMembers });
 
+  const stamp = new Date().toISOString().slice(0, 10);
   return {
     ok: true,
     data: {
       team: { id: team.id, name: team.name },
       deleted: { items: removedItems, members: removedMembers },
+      // 交给该团队管理员的完整备份（日程 + 成员名单）
+      export: {
+        filename: `workshop-团队${team.name}-日程备份-交给管理员-${stamp}.json`,
+        content: JSON.stringify({
+          version: 1,
+          kind: 'team-backup',
+          team: { id: team.id, name: team.name },
+          exportedAt: new Date().toISOString(),
+          note: `团队「${team.name}」已于 ${stamp} 解散。此文件是该团队解散前的全部日程备份，请交给该团队管理员留存；导入新团队时用工作台的「导入」选择本文件即可。`,
+          members: exportMembers,
+          items: exportItems,
+        }, null, 2),
+        itemCount: exportItems.length,
+      },
       // 如实说明：这些成员的令牌要 7 天才自然过期，但写操作已被 requireWriter 挡住
       note: '团队成员记录与日程已删除。成员手中的登录令牌会在 7 天后自然过期，其间无法写入任何数据。',
     },
@@ -1283,14 +1329,39 @@ async function deleteTeamEndpoint(event) {
   };
 }
 
-// GET ?_action=team —— 我自己所在的团队（任何登录成员都能看；joinCode 只给 admin）
+// GET ?_action=team —— 我自己所在的团队（任何登录成员都能看；joinCode 只给 admin/core）
+// 【2026-10-28】匿名也返回默认团队：底栏要显示"默认团队"四个字，匿名只读不是"无团队"
 async function teamInfo(event) {
   const actor = await resolveActor(event);
-  if (!actor) return { ok: false, data: null, error: { code: 401, message: '请先登录后查看团队信息' } };
+  if (!actor) {
+    // 匿名只读态固定看默认团队：只给名字与人数，绝不给邀请码（那是半个加入凭据）
+    const t = await db.findTeamById(1);
+    if (!t) return { ok: false, data: null, error: { code: 404, message: '默认团队不存在，请联系管理员' } };
+    const memberCount = await db.countTeamMembers(1);
+    return { ok: true, data: { team: { id: t.id, name: t.name, joinCode: null, memberCount } }, error: null };
+  }
   const t = await publicTeam(actor.teamId, actor.role);
   if (!t) return { ok: false, data: null, error: { code: 404, message: '团队不存在，请联系管理员' } };
   const memberCount = await db.countTeamMembers(actor.teamId);
   return { ok: true, data: { team: { ...t, memberCount } }, error: null };
+}
+
+// GET ?_action=teams —— 全部团队清单（仅 core）。core 解散其他团队前得先知道有哪些团队。
+// 普通成员/管理员调它 = 403：团队清单属于体系级信息，不给团队维度的人看。
+async function teamsList(event) {
+  const actor = await resolveActor(event);
+  if (!actor) return { ok: false, data: null, error: { code: 401, message: '请先登录' } };
+  if (actor.role !== 'core') return { ok: false, data: null, error: { code: 403, message: '只有核心管理员可以查看全部团队' } };
+  const teams = await db.listTeams();
+  const out = [];
+  for (const t of teams) {
+    out.push({
+      id: t.id, name: t.name, createdAt: t.createdAt,
+      memberCount: await db.countTeamMembers(t.id),
+      itemCount: await db.countItemsByTeam(t.id),
+    });
+  }
+  return { ok: true, data: out, error: null };
 }
 
 // POST ?_action=createteam —— 管理员建一个新团队，拿到团队码后分享给别人自助加入。
@@ -1314,8 +1385,20 @@ async function createTeamEndpoint(event) {
   } else {
     code = genTeamCode();
   }
-  const r = await db.createTeam({ name, joinCode: code, note: body.note });
-  if (r.conflict) return { ok: false, data: null, error: { code: 409, message: '该团队码已被占用，请换一个' } };
+  const userSuppliedCode = !!String(body.joinCode || '').trim();
+  // 【2026-10-28】自动生成的团队码也要防重复：genTeamCode 是随机的，理论上（且实测中）
+  // 可能撞上已有团队码。用户手输的码撞了 → 409 让他换；自动生成的 → 原地重试最多 5 次，
+  // 不该把"随机数撞了"这种系统内部问题抛给用户。
+  let r = null;
+  let lastConflict = false;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    r = await db.createTeam({ name, joinCode: code, note: body.note });
+    lastConflict = !!r.conflict;
+    if (!lastConflict) break;
+    if (!userSuppliedCode) { code = genTeamCode(); continue; }   // 自动码：换一个再试
+    break;                                                      // 用户手输：如实 409
+  }
+  if (lastConflict) return { ok: false, data: null, error: { code: 409, message: '该团队码已被占用，请换一个' } };
   if (r.error) return { ok: false, data: null, error: r.error };
   await db.insertAudit({
     actorId: actor.mid, action: 'create_team', targetId: r.team.id,
@@ -1393,6 +1476,15 @@ async function handle(event = {}) {
     try { return http(event, await teamInfo(event)); }
     catch (err) {
       logError('GET /api/team', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
+    }
+  }
+  // 【2026-10-28】全部团队清单（仅 core）
+  if (action === 'teams' && method === 'GET') {
+    try { return http(event, await teamsList(event)); }
+    catch (err) {
+      logError('GET /api/teams', err);
       const e = toUserError(err);
       return http(event, { ok: false, data: null, error: e }, e.code);
     }

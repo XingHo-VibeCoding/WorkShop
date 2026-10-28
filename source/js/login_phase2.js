@@ -138,6 +138,8 @@
       const lb = document.getElementById('btn-login');
       if (lb) lb.addEventListener('click', openLoginModal);
     }
+    // 【2026-10-28】身份一变就刷新底栏团队名（登录 / 登出 / 恢复会话都会走到这里）
+    if (typeof window.updateTeamBadge === 'function') window.updateTeamBadge();
   }
 
   function openLoginModal() {
