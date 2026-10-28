@@ -240,7 +240,67 @@ COMMENT ON COLUMN members_phase2.team_id IS '【2026-10-27】所属团队；团�
 COMMENT ON COLUMN audit_phase2.team_id   IS '【2026-10-27】留痕所属团队，便于按团队审计';
 
 /* ============================================================
- * 七、验证 SQL（在控制台逐句单独执行，不要和业务变更一起跑）
+ * 七、【2026-10-28】日程类型与颜色体系 + 核心管理员（core）
+ * ------------------------------------------------------------
+ * 用户决策（2026-10-28）：
+ *   ② 选 B —— 「新增颜色 = 新增日程类型」（不是只换色值，也不是另开标签维度）
+ *      并且允许改已有类型的颜色
+ *   ③ 选 A —— 新增一级「核心管理员（core）」，全局统一管所有团队的类型颜色
+ *
+ * 为什么类型表是**全局**而不是每团队一份：
+ *   颜色是跨团队沟通的公共语言（"蓝色=会议"）。若各团队各管一套，A 团队发来的截图
+ *   B 团队就看不懂了。所以类型/颜色只有一份，写权限只给 core。
+ *
+ * 为什么内置类型不可删：
+ *   items.type 里已经存着历史数据，删掉类型定义会让那批数据失去标签与颜色（不会丢数据，
+ *   但会变成"未知类型"）。内置 6 个 + other 一律 builtin=true，只允许改色改标签。
+ *
+ * 为什么变更留痕不进 audit_phase2：
+ *   audit_phase2 是**团队维度**的表（team_id NOT NULL），而类型变更是全局操作、
+ *   不属于任何团队。硬塞进去要么给个假 team_id，要么放宽约束——都是污染。
+ *   改为在类型表本身记 updated_by / updated_at，够追溯了。
+ * ============================================================ */
+CREATE TABLE IF NOT EXISTS item_types_phase2 (
+  id           SERIAL PRIMARY KEY,
+  code         VARCHAR(24)  NOT NULL UNIQUE,
+  label        VARCHAR(24)  NOT NULL,
+  color        VARCHAR(9)   NOT NULL,
+  builtin      BOOLEAN      NOT NULL DEFAULT FALSE,
+  sort_order   INT          NOT NULL DEFAULT 100,
+  updated_by   INT,
+  created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  CONSTRAINT chk_item_types_color CHECK (color ~ '^#[0-9a-fA-F]{6}$'),
+  CONSTRAINT chk_item_types_code  CHECK (code ~ '^[a-z][a-z0-9_]{1,23}$')
+);
+CREATE INDEX IF NOT EXISTS idx_item_types_order ON item_types_phase2(sort_order, id);
+
+-- 内置类型种子（颜色与 css/base.css 的 :root 变量逐字一致，避免"库里改了色、页面没变"）
+-- ON CONFLICT DO NOTHING：重复执行不会覆盖用户后来调过的颜色（幂等）
+INSERT INTO item_types_phase2 (code, label, color, builtin, sort_order) VALUES
+  ('meeting', '会议',   '#1d4ed8', TRUE, 10),
+  ('course',  '课表',   '#15803d', TRUE, 20),
+  ('travel',  '行程',   '#b45309', TRUE, 30),
+  ('sport',   '运动',   '#0e7490', TRUE, 40),
+  ('life',    '生活',   '#6d28d9', TRUE, 50),
+  ('pending', '待安排', '#5b6472', TRUE, 60),
+  ('other',   '其他',   '#5b6472', TRUE, 70)
+ON CONFLICT (code) DO NOTHING;
+
+-- 角色白名单扩展 core（全局超管：管类型/颜色体系；★不授予跨团队日程读写）
+ALTER TABLE members_phase2 DROP CONSTRAINT IF EXISTS chk_members_role;
+ALTER TABLE members_phase2 ADD CONSTRAINT chk_members_role
+  CHECK (role IN ('member', 'readonly', 'admin', 'core'));
+
+COMMENT ON TABLE  item_types_phase2 IS '【2026-10-28】日程类型与颜色（全局唯一一份）。内置类型不可删只可改；自定义类型由 core 增删。';
+COMMENT ON COLUMN item_types_phase2.code       IS '类型码：存进 items.type 的就是它。内置沿用历史词（meeting/course/travel/sport/life/pending/other）；自定义形如 custom_xxx';
+COMMENT ON COLUMN item_types_phase2.color      IS '类型色 #RRGGBB。前端启动时注入 --c-<code> CSS 变量；必须满足白字对比 ≥4.5:1（前后端都校验）';
+COMMENT ON COLUMN item_types_phase2.builtin    IS '内置类型：不可删除（库里已有历史数据在用），只可改色/改标签';
+COMMENT ON COLUMN item_types_phase2.updated_by IS '最后修改人的 members_phase2.id（全局操作不进团队维度的 audit_phase2，这里记一笔够追溯）';
+COMMENT ON COLUMN members_phase2.role          IS '角色 member 可编辑 / readonly 只读 / admin 团队管理员 / core 核心管理员（2026-10-28 新增：全局管类型颜色，不授予跨团队日程读写）';
+
+/* ============================================================
+ * 八、验证 SQL（在控制台逐句单独执行，不要和业务变更一起跑）
  * ------------------------------------------------------------
  * V1）新列是否存在（应返回 6 行）
  *   SELECT column_name, data_type, character_maximum_length
@@ -282,8 +342,21 @@ COMMENT ON COLUMN audit_phase2.team_id   IS '【2026-10-27】留痕所属团队�
  *   -- ④ 数据无损：仍应为 11
  *   SELECT COUNT(*) FROM items;
  *
- * 幂等验证：把本文件再执行一遍，应无报错、V1~V5 结果不变。
+ * V6）【2026-10-28】类型颜色表 + core 角色
+ *   -- ① 内置类型应 7 条（meeting/course/travel/sport/life/pending/other）
+ *   SELECT code, label, color, builtin, sort_order FROM item_types_phase2 ORDER BY sort_order, id;
+ *   -- ② 角色约束应含 4 个：member / readonly / admin / core
+ *   SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='chk_members_role';
+ *   -- ③ 谁是核心管理员（初始为空 —— 必须手工提权一次，见下方提示）
+ *   SELECT id, display_name, role, team_id FROM members_phase2 WHERE role = 'core';
+ *   -- ★ 提权一条（把第一个管理员升为 core；id 按上一条查询结果替换）
+ *   --   UPDATE members_phase2 SET role='core' WHERE id = 2;
+ *
+ * 幂等验证：把本文件再执行一遍，应无报错、V1~V6 结果不变。
  * 执行顺序铁律：**先跑本文件的 SQL，再重传 items 云函数**。
  *   反了会怎样：新函数按 team_id 过滤，而列还没加 → 所有查询 500。
  *   反过来（先 SQL 后函数）是安全的：旧函数不写 team_id，新列可空，互不影响。
+ *   【2026-10-28 起放宽】类型表缺表**不再**会导致崩：新函数读不到 item_types_phase2 时
+ *   会回退到内置 7 个类型的常量并打一条 console.error，站点继续可用（只是自定义类型不生效）。
+ *   这是刻意的：部署顺序错一步不该让整个站点 500。
  * ============================================================ */

@@ -40,11 +40,111 @@ let OWNERS = [
 const PROTECTED_OWNER_KEYS = ['self', 'me'];
 // [Day 9] 默认启动视图（设置可改，暂存内存）
 let defaultStartMode = 'work';
-// [Day 9] 类型色键值对照（设置可改，实时写入 CSS 变量）
-const TYPE_COLOR_DEFS = [
-  ['meeting', '会议'], ['trip', '行程'], ['pending', '待安排'],
-  ['class', '课表'], ['sport', '运动'], ['life', '生活'],
+
+/* ============ 【2026-10-28】类型与颜色：从「硬编码 6 个」改为「服务端下发」 ============
+   用户 2026-10-28 拍板 ②B：新增颜色 = 新增日程类型（不是只换色值，也不是另开标签维度）。
+   于是类型清单必须来自数据库 —— 类型码、名字、颜色、是否内置都存 item_types_phase2。
+
+   ⚠️ 绕的地方：库里存的是 meeting/course/travel/sport/life/pending，
+      而前端历史代码用 meeting/class/trip/sport/life/pending（class↔course、trip↔travel）。
+      CSS 类名、筛选值、色板 key 全是前端词。为不动这套已成型的样式，
+      这里保留「库词 → 前端词」的单向映射，只在渲染与请求边界转换：
+        · 拉到库词 course → 本地词 class → CSS 变量 --c-class
+        · 提交时本地词 class → 库词 course（走已有的 localTypeToApi）
+      自定义类型没有历史包袱，本地词 = 库词。
+
+   TYPE_FALLBACK 是"服务端没连上"时的兜底：页面照样能渲染色板和图例，
+   只是不能增删类型（写操作需要服务端）。 */
+const TYPE_LOCAL_OF = { course: 'class', travel: 'trip' };   // 库词 → 前端词
+const localTypeCode = c => TYPE_LOCAL_OF[c] || c;
+
+const TYPE_FALLBACK = [
+  { code: 'meeting', label: '会议',   color: '#1d4ed8', builtin: true, sortOrder: 10 },
+  { code: 'course',  label: '课表',   color: '#15803d', builtin: true, sortOrder: 20 },
+  { code: 'travel',  label: '行程',   color: '#b45309', builtin: true, sortOrder: 30 },
+  { code: 'sport',   label: '运动',   color: '#0e7490', builtin: true, sortOrder: 40 },
+  { code: 'life',    label: '生活',   color: '#6d28d9', builtin: true, sortOrder: 50 },
+  { code: 'pending', label: '待安排', color: '#5b6472', builtin: true, sortOrder: 60 },
+  { code: 'other',   label: '其他',   color: '#5b6472', builtin: true, sortOrder: 70 },
 ];
+
+// 类型清单（库词）与其前端投影
+let TYPE_LIST = TYPE_FALLBACK.slice();
+// [Day 9] 兼容旧代码的形状：[[前端词, 标签], ...]（筛选、图例、描述都在用）
+let TYPE_COLOR_DEFS = TYPE_LIST.map(t => [localTypeCode(t.code), t.label]);
+let TYPE_COLOR_VARS = {};   // 前端词 → CSS 变量名
+
+// 哪些内置类型属于哪张表（自定义类型两张表都出现 —— 用户建它就是为了通用）
+const WORK_BASE_TYPES = ['meeting', 'trip', 'pending'];
+const DAILY_BASE_TYPES = ['class', 'sport', 'life', 'other'];
+
+/* 把类型清单应用成「主题」：注入 CSS 变量 + 重建投影。
+   这是颜色体系的唯一入口 —— 无论是启动拉取、core 新增、还是改色，都走这里，
+   保证图例/色板/下拉/总览格子永远同源。 */
+function applyTypeTheme(list) {
+  if (!Array.isArray(list) || !list.length) return;
+  TYPE_LIST = list.slice().sort((a, b) => (a.sortOrder || 100) - (b.sortOrder || 100));
+  TYPE_COLOR_DEFS = TYPE_LIST.map(t => [localTypeCode(t.code), t.label]);
+  TYPE_COLOR_VARS = {};
+  TYPE_LIST.forEach(t => {
+    const lc = localTypeCode(t.code);
+    const v = '--c-' + lc;
+    TYPE_COLOR_VARS[lc] = v;
+    document.documentElement.style.setProperty(v, t.color);
+  });
+  // 未知类型的兜底色：把 other 的颜色也挂到 pending 上（两者历史同色）
+  if (TYPE_COLOR_VARS.other) {
+    document.documentElement.style.setProperty('--c-pending', (TYPE_LIST.find(t => localTypeCode(t.code) === 'other') || {}).color || '#5b6472');
+  }
+}
+
+function typeMetaOf(localCode) {
+  const lc = String(localCode || '');
+  return TYPE_LIST.find(t => localTypeCode(t.code) === lc) || null;
+}
+function typeLabel(localCode) {
+  const m = typeMetaOf(localCode);
+  return m ? m.label : '事项';
+}
+
+// 拉取类型清单：失败不阻断页面（用兜底继续），但要如实报一次
+let _typesLoaded = false;
+const typeSig = () => JSON.stringify(TYPE_LIST.map(t => [t.code, t.label, t.color]));
+async function loadTypeList() {
+  const before = typeSig();
+  try {
+    const res = await fetch(`${API_BASE}/api/items?_action=types`, {
+      headers: (window.Auth ? window.Auth.withHeaders({}) : {}),
+    });
+    const j = await res.json();
+    if (!res.ok || !j || !j.ok || !Array.isArray(j.data) || !j.data.length) {
+      throw new Error((j && j.error && j.error.message) || `HTTP ${res.status}`);
+    }
+    applyTypeTheme(j.data);
+    _typesLoaded = true;
+    // changed 让调用方决定要不要重绘：启动时若服务端清单与内置兜底一致（绝大多数情况），
+    // 就不该再刷一次屏 —— 首屏多一次重绘在弱网手机上肉眼可见地闪。
+    return { ok: true, list: j.data, changed: before !== typeSig() };
+  } catch (e) {
+    applyTypeTheme(TYPE_FALLBACK);
+    console.error('[类型清单] 拉取失败，使用内置兜底：', e.message);
+    return { ok: false, error: e.message, changed: before !== typeSig() };
+  }
+}
+
+/* 筛选下拉按类型清单重建。
+   ⚠️ 要保住用户当前选的值：重绘下拉很容易把「已选课表」悄悄打回「全部」，
+      用户会以为筛选失效了。所以先记 cur，重建后若该值还在就选回去。 */
+function renderTypeFilter() {
+  const sel = document.getElementById('filter-type');
+  if (!sel) return;
+  const cur = sel.value || 'all';
+  sel.innerHTML = '<option value="all">全部</option>' +
+    TYPE_COLOR_DEFS.map(([code, label]) => `<option value="${code}">${esc(label)}</option>`).join('');
+  const stillOk = cur === 'all' || TYPE_COLOR_DEFS.some(([c]) => c === cur);
+  sel.value = stillOk ? cur : 'all';
+  if (typeof filterState !== 'undefined') filterState.type = sel.value;
+}
 const ownerOf = key => OWNERS.find(o => o.key === key) || OWNERS[OWNERS.length - 1];
 
 /* 三模式：工作事项表 / 日常事项表 / 总表 */
@@ -61,10 +161,11 @@ function markOf(it) {
 }
 
 function typeLabelOf(it) {
-  if (it.table === 'daily') {
-    return ({ class: '课表', sport: '运动', life: '生活', other: '其他' })[it.type] || '日常';
-  }
-  return ({ meeting: '会议', trip: '行程', pending: '待安排' })[it.type] || '事项';
+  // 【2026-10-28】改为查类型清单：自定义类型也能显示自己的名字（原来只会落到"事项/日常"）
+  const known = typeMetaOf(it.type);
+  if (known) return known.label;
+  if (it.table === 'daily') return '日常';
+  return '事项';
 }
 
 // 取得「某周周一」的 Date；offset=0 本周，±1 上/下周
@@ -130,6 +231,14 @@ function isAdmin() {
   const m = window.Auth && window.Auth.currentMember();
   return !!(m && m.role === 'admin');
 }
+// 【2026-10-28】核心管理员（core）：全局唯一层级，管类型与颜色体系。
+// ★ 刻意不把 core 算作 isAdmin 的"超集"：core 拿到的是**体系级**权限（类型/颜色），
+//   它不是"更厉害的团队管理员"，也不获得跨团队日程读写权（那会破多团队隔离四红线）。
+//   两边都有的能力（如看团队码）在各自位置单独判。
+function isCore() {
+  const m = window.Auth && window.Auth.currentMember();
+  return !!(m && m.role === 'core');
+}
 function applyRoleUI() {
   const ro = isReadOnly();
   const me = (window.Auth && typeof window.Auth.currentMember === 'function') ? window.Auth.currentMember() : null;
@@ -147,6 +256,9 @@ function applyRoleUI() {
   // 【阶段二 Step5 口令体系】任意登录成员显示「修改我的口令」（自助改，管理员不可见）
   const pcSettings = document.getElementById('passcode-settings');
   if (pcSettings) pcSettings.hidden = !me;
+  // 【2026-10-28】type：新增类型表单只对核心管理员显示（服务端 requireCore 兜底）
+  const typeAdd = document.getElementById('type-add');
+  if (typeAdd) typeAdd.hidden = !isCore();
 }
 
 // ---- [Day 20] 真实 API 接线：loadItems 从 mock 切换为调用公网接口 ----
@@ -168,7 +280,13 @@ function fmtAPITime(d) {
 // API 类型词表 → 前端 CSS 词表。数据库存的是 API 词（course/travel/...），
 // 前端色板/图例/筛选按 mock 词表（class/trip/...）定义；未知词兜底为 other（灰）。
 const API_TYPE_MAP = { meeting: 'meeting', course: 'class', travel: 'trip', sport: 'sport', life: 'life', pending: 'pending' };
-const apiTypeToLocal = t => API_TYPE_MAP[t] || 'other';
+// 【2026-10-28】未知类型词不再一律兜底成 other —— 自定义类型本来就是新词，
+// 兜底会把它显示成灰色"其他"，等于新类型白建。只有空值才兜底。
+const apiTypeToLocal = t => {
+  const v = String(t || '').trim();
+  if (!v) return 'other';
+  return API_TYPE_MAP[v] || v;
+};
 
 function apiItemToLocal(a) {
   const t = s => String(s || '').slice(11, 16);            // "YYYY-MM-DD HH:mm" → "HH:mm"
@@ -361,6 +479,9 @@ function renderItemCard(item, opts = {}) {
   const m = markOf(item);
   const el = document.createElement('div');
   el.className = `item type-${item.type}`;
+  // 【2026-10-28】自定义类型没有对应的 CSS 类，靠内联变量上色；内置类型这行与 CSS 等价，
+  // 统一走内联的好处是「颜色只有一个来源（类型清单）」，改色立刻全站生效。
+  el.style.background = `var(${TYPE_COLOR_VARS[item.type] || '--c-' + item.type}, var(--c-pending))`;
   // 【阶段二 P8】协作外框色：用成员 borderColor 标"谁的项"；填充色仍是类型色（颜色铁律，不变）
   if (item.borderColor) el.style.borderColor = item.borderColor;
   el.dataset.id = item.id;
@@ -545,13 +666,10 @@ function markHTML(m, withName) {
 }
 
 function legendHTML() {
-  const TYPE_C = {
-    meeting: 'var(--c-meeting)', trip: 'var(--c-trip)', pending: 'var(--c-pending)',
-    class: 'var(--c-class)', sport: 'var(--c-sport)', life: 'var(--c-life)', other: 'var(--c-pending)',
-  };
-  const TYPE_L = { meeting: '会议', trip: '行程', pending: '待安排', class: '课表', sport: '运动', life: '生活', other: '其他' };
-  const typeLegend = Object.keys(TYPE_L)
-    .map(k => `<span class="legend-item"><span class="chip" style="background:${TYPE_C[k]}"></span>${TYPE_L[k]}</span>`).join('');
+  // 【2026-10-28】图例改为按类型清单生成：自定义类型自动出现在这里，不用改代码
+  const typeLegend = TYPE_COLOR_DEFS
+    .map(([k, label]) => `<span class="legend-item"><span class="chip" style="background:var(${TYPE_COLOR_VARS[k] || '--c-pending'})"></span>${esc(label)}</span>`)
+    .join('');
   const markList = OWNERS.map(o => {
     const m = markOf({ ownerKey: o.key });
     return `<span class="legend-item">${markHTML(m)} ${esc(o.name)}</span>`;
@@ -1024,7 +1142,7 @@ function showDetail(item) {
       <h3>${esc(item.title)}</h3>
       <p class="row">
         <span class="badge table-${item.table}">${tableLabel}</span>
-        <span class="badge type-${item.type}">${typeLabelOf(item)}</span>
+        <span class="badge type-${item.type}" style="background:var(${TYPE_COLOR_VARS[item.type] || '--c-' + item.type}, var(--c-pending))">${typeLabelOf(item)}</span>
         ${ownerHTML}
       </p>
       <p class="row"><b>时间</b>${fmtMD(item.start)} ${item.startTime}–${item.endTime}</p>
@@ -1178,10 +1296,18 @@ async function renderForm(existing) {
 }
 
 function typeOptionsHTML(table, selected) {
-  const map = table === 'daily'
-    ? [['class', '课表'], ['sport', '运动'], ['life', '生活'], ['other', '其他']]
-    : [['meeting', '会议'], ['trip', '行程'], ['pending', '待安排']];
-  return map.map(([v, l]) => `<option value="${v}" ${v === selected ? 'selected' : ''}>${l}</option>`).join('');
+  // 【2026-10-28】按类型清单生成：内置类型按表归属（工作表只出会议/行程/待安排，
+  // 日常表只出课表/运动/生活/其他），自定义类型两张表都出 —— 用户建它就是为了哪儿都能用。
+  const base = table === 'daily' ? DAILY_BASE_TYPES : WORK_BASE_TYPES;
+  const opts = [];
+  TYPE_COLOR_DEFS.forEach(([code, label]) => { if (base.includes(code)) opts.push({ code, label }); });
+  TYPE_LIST.forEach(t => {
+    const lc = localTypeCode(t.code);
+    if (!t.builtin && !opts.some(o => o.code === lc)) opts.push({ code: lc, label: t.label });
+  });
+  // 历史数据可能挂在某个当前清单里没有的类型上：补一条，避免下拉显示空白
+  if (selected && !opts.some(o => o.code === selected)) opts.push({ code: selected, label: typeLabel(selected) });
+  return opts.map(({ code, label }) => `<option value="${code}" ${code === selected ? 'selected' : ''}>${esc(label)}</option>`).join('');
 }
 
 // [板块B] 重复规则匹配：判断某天 d 是否落在规则内（dw: 0=周日）
@@ -1853,6 +1979,8 @@ document.getElementById('btn-batch-all').addEventListener('click', () => selectA
 document.getElementById('btn-batch-none').addEventListener('click', () => clearSelect());
 document.getElementById('btn-batch-delete').addEventListener('click', () => openBatchDeleteModal());
 document.getElementById('btn-batch-exit').addEventListener('click', () => exitSelectMode());
+// 【2026-10-28】新增日程类型（仅核心管理员；服务端 requireCore 兜底）
+document.getElementById('btn-add-type').addEventListener('click', () => submitAddType());
 document.getElementById('btn-undo').addEventListener('click', () => doUndo());
 document.getElementById('btn-undo-close').addEventListener('click', () => clearUndo());
 // Esc 退出批量模式（未删任何东西，纯退出，不需要确认）
@@ -1916,6 +2044,13 @@ async function bootstrap() {
 currentMode = defaultStartMode;
 activateModeTab(currentMode);
 initSheetDrag();   // [Day 25] 绑定移动端副栏拖动手柄（桌面端内部 isMobile 守卫，空操作）
+// 【2026-10-28】类型清单先拉一次：首屏的图例/色板/筛选下拉就带上自定义类型与最新颜色。
+// 不 await —— 拉不到也不能耽误看日程（loadTypeList 内部已兜底成内置 7 个）。
+loadTypeList().then(r => {
+  renderTypeFilter();
+  if (typeof renderColorList === 'function') renderColorList();
+  if (r.changed) render();   // 清单与兜底一致时不重绘（避免首屏多刷一次）
+});
 bootstrap();
 // 【阶段二 在线人数 2026-10-18】启动心跳（匿名也跑：只上报可见性，不记心跳）
 startHeartbeat();
@@ -2465,37 +2600,135 @@ function addOwner() {
   afterOwnerChange(); renderOwnerList();
 }
 
-const TYPE_COLOR_VARS = {
-  meeting: '--c-meeting', trip: '--c-trip', pending: '--c-pending',
-  class: '--c-class', sport: '--c-sport', life: '--c-life'
-};
+/* ============ 【2026-10-28】类型与颜色管理（core 核心管理员） ============
+   和旧实现的三点不同：
+     1) 原来改色只 `setProperty` 到 CSS 变量 → **刷新就丢**，而且各人各调一套，谁也看不见谁的。
+        现在改色落库（item_types_phase2），全团队/全站同一套。
+     2) 原来固定 6 个类型，改不了名字也加不了新的。现在可以新增/改名/删除自定义类型。
+     3) 原来任何人（含匿名）都能点。现在只有 core 能改——颜色是跨团队公共语言，
+        谁都能改就等于没有公共语言。
+   前端仍做对比度校验：不是为了安全（后端也校验），而是为了在用户还在拖色盘时就给反馈。 */
 function renderColorList() {
   const wrap = document.getElementById('color-list');
+  if (!wrap) return;
+  const editable = isCore();
   wrap.innerHTML = '';
-  TYPE_COLOR_DEFS.forEach(([key, label]) => {
-    const cur = getComputedStyle(document.documentElement).getPropertyValue(TYPE_COLOR_VARS[key]).trim() || '#2f6fed';
+
+  TYPE_LIST.forEach(t => {
     const row = document.createElement('div');
     row.className = 'color-row';
-    row.innerHTML = `
-      <span class="c-label">${label}</span>
-      <input type="color" data-key="${key}" value="${cur}">
-      <input class="c-hex" readonly value="${cur}">
-      <span class="c-warn" data-key="${key}" hidden>白字对比不足</span>
-    `;
+    row.innerHTML =
+      `<input class="c-name" data-code="${t.code}" value="${esc(t.label)}" maxlength="12" ${editable ? '' : 'readonly'} title="${t.builtin ? '内置类型：可改名改色，不可删除' : '自定义类型：可改名、改色、删除'}">` +
+      `<input type="color" data-code="${t.code}" value="${t.color}" ${editable ? '' : 'disabled'}>` +
+      `<input class="c-hex" readonly value="${t.color}">` +
+      `<span class="c-warn" data-code="${t.code}" hidden>白字对比不足</span>` +
+      (editable ? `<button class="c-del" data-code="${t.code}" ${t.builtin ? 'disabled' : ''} title="${t.builtin ? '内置类型不能删除（历史日程还在用）' : '删除这个类型'}">删</button>` : '');
     wrap.appendChild(row);
   });
-  wrap.querySelectorAll('input[type=color]').forEach(inp => inp.addEventListener('input', e => {
-    const key = e.target.dataset.key, val = e.target.value;
-    const row = e.target.closest('.color-row');
-    row.querySelector('.c-hex').value = val;
-    if (isSafeBg(val)) {
-      row.querySelector('.c-warn').hidden = true;
-      document.documentElement.style.setProperty(TYPE_COLOR_VARS[key], val); // 达标才应用
-    } else {
-      row.querySelector('.c-warn').hidden = false; // 低于 4.5:1 不应用，防调回不达标浅色
-    }
+
+  if (!editable) {
+    const note = document.createElement('p');
+    note.className = 'set-hint';
+    note.textContent = '类型与颜色由核心管理员统一管理（颜色是跨团队的公共语言，不能各团队各调一套）。';
+    wrap.appendChild(note);
+    return;
+  }
+
+  // —— 改色：拖动时本地预览，松手才落库 ——
+  wrap.querySelectorAll('input[type=color]').forEach(inp => {
+    const code = inp.dataset.code;
+    const row = inp.closest('.color-row');
+    inp.addEventListener('input', e => {
+      const val = e.target.value;
+      row.querySelector('.c-hex').value = val;
+      const ok = isSafeBg(val);
+      row.querySelector('.c-warn').hidden = ok;
+      if (ok) { document.documentElement.style.setProperty(TYPE_COLOR_VARS[localTypeCode(code)] || '--c-' + localTypeCode(code), val); render(); }
+    });
+    inp.addEventListener('change', async e => {
+      const val = e.target.value;
+      if (!isSafeBg(val)) { showToast('颜色太浅，白字看不清，已放弃这次修改'); await loadTypeList(); renderColorList(); render(); return; }
+      try {
+        await apiMutate('POST', `${API_BASE}/api/items?_action=updatetype`, { code, color: val });
+        await loadTypeList();
+        renderColorList();
+        render();
+        showToast('颜色已更新（全团队生效）');
+      } catch (err) {
+        showToast('改色失败：' + err.message);
+        await loadTypeList();   // 回到服务端真值，别让界面停在假状态
+        renderColorList();
+        render();
+      }
+    });
+  });
+
+  // —— 改名：失焦时提交（回车也触发失焦） ——
+  wrap.querySelectorAll('.c-name').forEach(inp => {
+    const code = inp.dataset.code;
+    const orig = inp.value;
+    inp.addEventListener('blur', async () => {
+      const val = inp.value.trim();
+      if (!val || val === orig) { inp.value = orig; return; }
+      try {
+        await apiMutate('POST', `${API_BASE}/api/items?_action=updatetype`, { code, label: val });
+        await loadTypeList();
+        renderColorList();
+        render();
+        showToast('类型名称已更新');
+      } catch (err) {
+        showToast('改名失败：' + err.message);
+        inp.value = orig;
+      }
+    });
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') inp.blur(); });
+  });
+
+  // —— 删除：只对自定义类型可用，且服务端还会再查一次"有没有日程在用" ——
+  wrap.querySelectorAll('.c-del').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const code = btn.dataset.code;
+      const t = TYPE_LIST.find(x => x.code === code);
+      if (!t) return;
+      if (!window.confirm(`确定删除类型「${t.label}」吗？\n\n只有"没有任何日程在用"时才能删成功。`)) return;
+      btn.disabled = true;
+      try {
+        await apiMutate('POST', `${API_BASE}/api/items?_action=deletetype`, { code });
+        await loadTypeList();
+        renderColorList();
+        render();
+        showToast(`已删除类型「${t.label}」`);
+      } catch (err) {
+        showToast('删除失败：' + err.message);
+        btn.disabled = false;
+      }
+    });
+  });
+}
+
+// 新增类型：用户只填「名字 + 颜色」，类型码由服务端生成（见 addItemType 注释）
+async function submitAddType() {
+  const nameEl = document.getElementById('new-type-name');
+  const colorEl = document.getElementById('new-type-color');
+  if (!isCore()) { showToast('只有核心管理员可以新增类型'); return; }
+  const label = (nameEl && nameEl.value || '').trim();
+  const color = (colorEl && colorEl.value) || '';
+  if (!label) { showToast('请先填类型名称'); if (nameEl) nameEl.focus(); return; }
+  if (!isSafeBg(color)) { showToast('这个颜色配白字太浅，请选深一点的'); return; }
+  const btn = document.getElementById('btn-add-type');
+  if (btn) btn.disabled = true;
+  try {
+    await apiMutate('POST', `${API_BASE}/api/items?_action=addtype`, { label, color });
+    await loadTypeList();
+    renderColorList();
     render();
-  }));
+    if (nameEl) nameEl.value = '';
+    showToast(`已新增类型「${label}」`);
+  } catch (err) {
+    showToast('新增失败：' + err.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function downloadJSON(obj, filename) {

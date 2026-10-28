@@ -39,7 +39,9 @@ let timeouts = [];             // 被挂起的 setTimeout 回调（flushPendingS
 function elStub(id) {
   return {
     id, hidden: false, textContent: '', innerHTML: '', value: '', checked: false,
-    dataset: {}, style: {}, children: [], files: [], scrollTop: 0,
+    dataset: {}, children: [], files: [], scrollTop: 0,
+    // 2026-10-28：类型主题靠 documentElement.style.setProperty 注入 CSS 变量，桩必须支持
+    style: { setProperty() {}, removeProperty() {} },
     classList: { toggle() {}, add() {}, remove() {}, contains() { return false; } },
     addEventListener() {}, removeEventListener() {},
     appendChild(c) { this.children.push(c); return c; },

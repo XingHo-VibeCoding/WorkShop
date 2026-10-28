@@ -847,6 +847,149 @@ async function countTeamMembers(teamId) {
   return Array.isArray(rows) ? rows.length : 0;
 }
 
+/* ============ 【2026-10-28】日程类型与颜色（全局一份，core 管理员维护） ============
+   为什么这些函数**不带 teamId**：类型/颜色是跨团队的公共语言（"蓝色=会议"），
+   不属于任何团队。带上 teamId 反而会分裂成"每团队一套颜色"，破坏可读性。
+   这是本项目里唯一有意不带 teamId 的表——因此写操作必须由控制器用 requireCore 把住。 */
+
+function mapTypeRow(r) {
+  return {
+    code: r.code,
+    label: r.label,
+    color: r.color,
+    builtin: !!r.builtin,
+    sortOrder: r.sort_order != null ? Number(r.sort_order) : 100,
+  };
+}
+
+async function listItemTypes() {
+  const token = await getBearer();
+  const p = new URLSearchParams();
+  p.set('select', 'code,label,color,builtin,sort_order');
+  p.set('order', 'sort_order.asc,id.asc');
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/item_types_phase2?${p.toString()}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}`, 'Accept': 'application/json', 'Accept-Profile': SCHEMA },
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch (e) { /* 非 JSON：下面按 status 判断 */ }
+  if (!res.ok) throw new Error(`读取类型表失败（HTTP ${res.status}）`);
+  const rows = Array.isArray(json) ? json : (json && json.data) || [];
+  return rows.map(mapTypeRow);
+}
+
+async function findItemTypeByCode(code) {
+  const token = await getBearer();
+  const p = new URLSearchParams();
+  p.set('select', 'code,label,color,builtin,sort_order');
+  p.set('code', `eq.${String(code)}`);
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/item_types_phase2?${p.toString()}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}`, 'Accept': 'application/json', 'Accept-Profile': SCHEMA },
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch (e) {}
+  if (!res.ok) throw new Error(`查询类型失败（HTTP ${res.status}）`);
+  const rows = Array.isArray(json) ? json : (json && json.data) || [];
+  return rows.length ? mapTypeRow(rows[0]) : null;
+}
+
+async function insertItemType({ code, label, color, sortOrder, updatedBy }) {
+  const token = await getBearer();
+  const row = {
+    code: String(code),
+    label: String(label),
+    color: String(color),
+    builtin: false,
+    sort_order: sortOrder != null ? Number(sortOrder) : 100,
+    updated_by: updatedBy != null ? Number(updatedBy) : null,
+  };
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/item_types_phase2`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Accept-Profile': SCHEMA,
+      'Content-Profile': SCHEMA,
+      'Prefer': 'return=representation',
+    },
+    body: JSON.stringify([row]),
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch (e) {}
+  if (!res.ok) {
+    const msg = (json && (json.message || json.hint)) || `HTTP ${res.status}`;
+    const isDup = res.status === 409 || (json && json.code === '23505') || /duplicate key/i.test(msg);
+    return { conflict: isDup, message: msg };
+  }
+  const rows = Array.isArray(json) ? json : (json && json.data) || [];
+  return { type: rows.length ? mapTypeRow(rows[0]) : null };
+}
+
+async function updateItemType(code, patch) {
+  const token = await getBearer();
+  const row = {};
+  if (patch.label !== undefined) row.label = String(patch.label);
+  if (patch.color !== undefined) row.color = String(patch.color);
+  if (patch.sortOrder !== undefined) row.sort_order = Number(patch.sortOrder);
+  if (patch.updatedBy !== undefined) row.updated_by = patch.updatedBy != null ? Number(patch.updatedBy) : null;
+  row.updated_at = new Date().toISOString();
+  const p = new URLSearchParams();
+  p.set('code', `eq.${String(code)}`);
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/item_types_phase2?${p.toString()}`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Accept-Profile': SCHEMA,
+      'Content-Profile': SCHEMA,
+      'Prefer': 'return=representation',
+    },
+    body: JSON.stringify(row),
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch (e) {}
+  if (!res.ok) throw new Error(`更新类型失败（HTTP ${res.status}）`);
+  const rows = Array.isArray(json) ? json : (json && json.data) || [];
+  return rows.length ? mapTypeRow(rows[0]) : null;
+}
+
+async function deleteItemType(code) {
+  const token = await getBearer();
+  const p = new URLSearchParams();
+  p.set('code', `eq.${String(code)}`);
+  p.set('builtin', 'eq.false');   // 内置类型在 SQL 层就挡住（应用层也判，双保险）
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/item_types_phase2?${p.toString()}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}`, 'Accept-Profile': SCHEMA, 'Content-Profile': SCHEMA, 'Prefer': 'return=representation' },
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch (e) {}
+  if (!res.ok) throw new Error(`删除类型失败（HTTP ${res.status}）`);
+  const rows = Array.isArray(json) ? json : (json && json.data) || [];
+  return rows.length;
+}
+
+// 引用统计：类型是全局的，所以**跨全部团队**统计（不能只查本团队，否则会删掉别人在用的类型）
+async function countItemsByType(code) {
+  const token = await getBearer();
+  const p = new URLSearchParams();
+  p.set('select', 'id');
+  p.set('type', `eq.${String(code)}`);
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/items?${p.toString()}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}`, 'Accept': 'application/json', 'Accept-Profile': SCHEMA },
+  });
+  if (!res.ok) return -1;   // -1 = 查不出来：控制器会因此拒绝删除（宁可删不掉，不可误删）
+  const rows = await res.json().catch(() => []);
+  return Array.isArray(rows) ? rows.length : -1;
+}
+
 module.exports = {
   queryItems,
   findDuplicate,
@@ -875,4 +1018,11 @@ module.exports = {
   listTeams,
   countTeamMembers,
   requireTeamId,
+  // 【2026-10-28】类型与颜色（全局，core 管理员维护）
+  listItemTypes,
+  findItemTypeByCode,
+  insertItemType,
+  updateItemType,
+  deleteItemType,
+  countItemsByType,
 };

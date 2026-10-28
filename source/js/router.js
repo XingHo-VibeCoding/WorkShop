@@ -130,15 +130,15 @@
       const n = (s.work ? 1 : 0) + (s.daily ? 1 : 0);
       if (n >= 2) {
         return '<div class="ov-slot filled heavy" style="background:var('
-          + TYPE_COLOR_VARS[s.type] + ')" title="' + esc(typeName(s.type))
+          + (TYPE_COLOR_VARS[s.type] || '--c-pending') + ')" title="' + esc(typeName(s.type))
           + '（工作+日常重叠，安排重）"></div>';
       }
       return '<div class="ov-slot filled light" style="background:var('
-        + TYPE_COLOR_VARS[s.type] + ')" title="' + esc(typeName(s.type))
+        + (TYPE_COLOR_VARS[s.type] || '--c-pending') + ')" title="' + esc(typeName(s.type))
         + '（单表占用，安排轻）"></div>';
     }
     return '<div class="ov-slot filled" style="background:var('
-      + TYPE_COLOR_VARS[s.type] + ')" title="' + esc(typeName(s.type)) + '"></div>';
+      + (TYPE_COLOR_VARS[s.type] || '--c-pending') + ')" title="' + esc(typeName(s.type)) + '"></div>';
   }
 
   // 把 items 映射到 7×SLOTS 占用网格

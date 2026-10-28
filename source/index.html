@@ -122,9 +122,17 @@
           <hr>
 
           <section class="set-section">
-            <h4>2 · 类型颜色</h4>
-            <p class="set-hint">调整 6 个类型色；白字需 ≥4.5:1（低于会提示，防止调回不达标浅色）。</p>
+            <h4>2 · 类型与颜色</h4>
+            <!-- [2026-10-28] 颜色 = 日程类型（用户拍板 ②B）。类型清单存服务端，全站共用一套：
+                 每个类型就是时间线上的一种颜色，新增类型＝新增一种颜色。 -->
+            <p class="set-hint">每个类型对应时间线上的一种颜色。<b>颜色是跨团队的公共语言</b>，所以由核心管理员统一维护；
+              白字对比度需 ≥4.5:1，太浅的颜色会被拒绝（防止调成看不清的浅色）。</p>
             <div id="color-list"></div>
+            <div class="type-add" id="type-add" hidden>
+              <input id="new-type-name" type="text" placeholder="新类型名（如：值班）" maxlength="12" aria-label="新类型名称">
+              <input id="new-type-color" type="color" value="#0f766e" aria-label="新类型颜色">
+              <button class="primary" id="btn-add-type">+ 新增类型</button>
+            </div>
           </section>
 
           <hr>

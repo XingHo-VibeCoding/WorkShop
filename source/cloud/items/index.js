@@ -119,12 +119,44 @@ const FIELD_CN = {
 };
 
 const TABLE_KINDS = ['work', 'daily'];
-const ITEM_TYPES = ['meeting', 'trip', 'travel', 'course', 'class', 'sport', 'life', 'other', 'pending'];
+// 【2026-10-28】类型白名单从「硬编码数组」改成「读 item_types_phase2 表」，
+// 支持 core 管理员在线增删类型。这里的常量退化为**兜底**：读不到表时仍按这 7 个走，
+// 站点不会因为"SQL 还没跑"就全站 500（部署顺序错一步不该让整个站点挂掉）。
+// ⚠️ 刻意收紧：原来白名单里还有 'trip' / 'class'（前端历史词），现在去掉了。
+//    写入只接受库词 —— 前端两处（表单提交、导入）都已经过 localTypeToApi 转换，
+//    留着这两个词只会让库里混进两种词表，将来做统计/迁移时更麻烦。
+//    读取侧不受影响：老数据若真有 trip/class，apiTypeToLocal 原样保留，照样能显示。
+const ITEM_TYPES_FALLBACK = ['meeting', 'course', 'travel', 'sport', 'life', 'pending', 'other'];
 const OWNER_KEYS = ['self', 'depta', 'deptb', 'deptc', 'deptd', 'me'];
 // 【阶段二 管理员 UI】可指派的角色白名单（与 db/schema_phase2.sql 的 chk_members_role 一致）
+// 【2026-10-28】新增 core（全局核心管理员）。★ 刻意**不放进 setRole 的白名单**：
+//   任命 core 只能走控制台 SQL —— 否则任一团队管理员都能把自己升成跨团队超管，等于没有边界。
 const MEMBER_ROLES = ['member', 'readonly', 'admin'];
 // 【阶段二 Step5】添加成员的 UI 只给这两档；admin 任命刻意不走 UI（初期只此一条通道＝控制台 SQL，用户 10-22 拍板）
 const ADD_MEMBER_ROLES = ['member', 'readonly'];
+
+/* ---- 类型清单：带 30s 缓存 + 失败回退 ----
+   为什么缓存：createItem / patchItem 每次都要校验 type，一次日程写入不该多打一次类型表查询。
+   为什么失败回退：见上面 ITEM_TYPES_FALLBACK 的注释。回退时打 console.error，排查时能看到。 */
+let _typeCodesCache = null;
+let _typeCodesAt = 0;
+const TYPE_CACHE_MS = 30000;
+
+async function loadItemTypeCodes(force) {
+  if (!force && _typeCodesCache && Date.now() - _typeCodesAt < TYPE_CACHE_MS) return _typeCodesCache;
+  try {
+    const rows = await db.listItemTypes();
+    if (!Array.isArray(rows) || !rows.length) throw new Error('类型表为空');
+    _typeCodesCache = rows.map(r => r.code);
+    _typeCodesAt = Date.now();
+    return _typeCodesCache;
+  } catch (e) {
+    // 表不存在 / 查询失败 → 回退内置白名单（宁可少支持自定义类型，也不能让写入全挂）
+    console.error('[类型清单降级] 读取 item_types_phase2 失败，回退内置类型：', e && e.message);
+    return ITEM_TYPES_FALLBACK;
+  }
+}
+function invalidateTypeCache() { _typeCodesCache = null; _typeCodesAt = 0; }
 
 // 【2026-10-27 多团队隔离】默认团队码：现有数据全部归入它，匿名只读也落在它上面。
 // 与 db/schema_phase2.sql 里 INSERT 的 join_code 必须逐字一致（含大小写）。
@@ -247,7 +279,7 @@ async function createItem(event) {
   if (!TABLE_KINDS.includes(table)) {
     return { ok: false, data: null, error: { code: 400, message: '所属表取值无效：应为 work 或 daily' } };
   }
-  if (!ITEM_TYPES.includes(type)) {
+  if (!(await loadItemTypeCodes()).includes(type)) {
     return { ok: false, data: null, error: { code: 400, message: `事项类型取值无效：${type}` } };
   }
   if (!OWNER_KEYS.includes(ownerKey)) {
@@ -436,7 +468,7 @@ async function patchItem(event) {
     }
     if (k === 'type') {
       v = String(v).trim();
-      if (!ITEM_TYPES.includes(v)) return { ok: false, data: null, error: { code: 400, message: `事项类型取值无效：${v}` } };
+      if (!(await loadItemTypeCodes()).includes(v)) return { ok: false, data: null, error: { code: 400, message: `事项类型取值无效：${v}` } };
     }
     if (k === 'ownerKey') {
       v = String(v).trim();
@@ -602,7 +634,7 @@ async function publicTeam(teamId, role) {
   return {
     id: t.id,
     name: t.name,
-    joinCode: role === 'admin' ? t.joinCode : null,
+    joinCode: (role === 'admin' || role === 'core') ? t.joinCode : null,
   };
 }
 
@@ -809,6 +841,12 @@ async function setRole(event) {
   if (!target || target.teamId !== actor.teamId) {
     return { ok: false, data: null, error: { code: 404, message: '目标成员不存在' } };
   }
+  // 【2026-10-28】core（核心管理员）只能由控制台 SQL 调整：
+  //   若团队管理员能把 core 降成 member，等于任何人都能摘掉跨团队超管 —— 那 core 就没有
+  //   存在的意义了。同理，core 的任命也不开放给 API（见 MEMBER_ROLES 不含 core）。
+  if (String(target.role || '') === 'core') {
+    return { ok: false, data: null, error: { code: 403, message: '核心管理员的角色只能在控制台调整，站点内不可修改' } };
+  }
   const result = await db.updateMemberRole(memberId, role, actor.teamId);
   if (result.error) return { ok: false, data: null, error: result.error };
   if (result.notFound) {
@@ -998,6 +1036,177 @@ function genTeamCode() {
   return 'WS-' + s;
 }
 
+/* ============ 【2026-10-28】日程类型与颜色（全局唯一一份，core 核心管理员维护） ============
+   权限设计（用户 2026-10-28 拍板 ②B + ③A）：
+     - 读：**任何人**（含匿名）。前端启动就要用类型色渲染图例/色板，未登录看到的也应一致。
+     - 写（增/删/改色/改名）：仅 role === 'core'。
+   为什么不给团队 admin：
+     类型色是跨团队公共语言（"蓝色=会议"）。任一团队管理员都能改，等于每个团队都能
+     悄悄改掉别人团队看到的颜色语义。要改就得由一个人统一改 —— 这就是 core 存在的理由。
+   ★ core 不获得跨团队日程读写权：那会打破多团队隔离（四红线：看不到/改不了/删不了/管不了）。
+     它拿到的是"体系级"权限，不是"数据级"权限。 */
+
+// 白字对比度（WCAG 相对亮度公式）。与前端 timeline.js 的 isSafeBg 用同一套算法 —— 双端一致，
+// 否则会出现"前端说能存、后端说太浅"的扯皮。
+function relLuminance(hex) {
+  const h = String(hex).replace('#', '');
+  const c = [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16) / 255)
+    .map(v => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)));
+  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+}
+function whiteContrast(hex) { return 1.05 / (relLuminance(hex) + 0.05); }
+
+function normalizeHex(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (!/^#[0-9a-fA-F]{6}$/.test(s)) return null;
+  return s.toLowerCase();
+}
+
+// 降级用的内置标签与颜色（读不到类型表时，GET /types 仍要能返回一套可用的）
+const FALLBACK_TYPE_META = {
+  meeting: ['会议', '#1d4ed8'], course: ['课表', '#15803d'], travel: ['行程', '#b45309'],
+  sport: ['运动', '#0e7490'], life: ['生活', '#6d28d9'], pending: ['待安排', '#5b6472'],
+  other: ['其他', '#5b6472'],
+};
+
+async function requireCore(event) {
+  const actor = await resolveActor(event);
+  if (!actor) return { error: { code: 401, message: '请先登录后再管理类型与颜色' } };
+  if (String(actor.role || '') !== 'core') {
+    return { error: { code: 403, message: '只有核心管理员可以修改类型与颜色' } };
+  }
+  return { actor };
+}
+
+// GET ?_action=types —— 类型清单（公开读）
+async function listTypes(event) {
+  try {
+    const rows = await db.listItemTypes();
+    if (Array.isArray(rows) && rows.length) return { ok: true, data: rows, error: null };
+    throw new Error('类型表为空');
+  } catch (e) {
+    console.error('[类型清单降级] 读取 item_types_phase2 失败，返回内置类型：', e && e.message);
+    const rows = ITEM_TYPES_FALLBACK.map((code, i) => {
+      const meta = FALLBACK_TYPE_META[code] || [code, '#5b6472'];
+      return { code, label: meta[0], color: meta[1], builtin: true, sortOrder: (i + 1) * 10 };
+    });
+    return { ok: true, data: rows, error: null };
+  }
+}
+
+// POST ?_action=addtype —— 新增类型（core）。code 由服务端生成，用户只填「名字 + 颜色」。
+// 为什么不让用户填 code：code 会进 items.type 且受 ^[a-z][a-z0-9_]{1,23}$ 约束，
+//   让人想英文名既费劲又容易踩格式错误；让用户填中文名 + 选色，机器生成 custom_xxx 更稳。
+async function addItemType(event) {
+  const gate = await requireCore(event);
+  if (gate.error) return { ok: false, data: null, error: gate.error };
+  const body = getBody(event);
+
+  const label = String(body.label || '').trim();
+  if (!label) return { ok: false, data: null, error: { code: 400, message: '请填写类型名称' } };
+  if (label.length > 12) return { ok: false, data: null, error: { code: 400, message: '类型名称最长 12 个字' } };
+
+  const color = normalizeHex(body.color);
+  if (!color) return { ok: false, data: null, error: { code: 400, message: '颜色格式应为 #RRGGBB（如 #1d4ed8）' } };
+  const ratio = whiteContrast(color);
+  if (ratio < 4.5) {
+    return { ok: false, data: null, error: { code: 422, message: `颜色太浅：白字对比度只有 ${ratio.toFixed(1)}:1，低于 4.5:1 会看不清，请选深一点的色` } };
+  }
+
+  const all = await db.listItemTypes().catch(() => []);
+  if (all.some(t => t.label === label)) {
+    return { ok: false, data: null, error: { code: 409, message: `已有同名类型「${label}」，请换个名字` } };
+  }
+  if (all.length >= 30) {
+    return { ok: false, data: null, error: { code: 422, message: '类型最多 30 个，已经到上限（太多了图例会挤满屏幕）' } };
+  }
+
+  // code：custom_ + 6 位 base36。撞车概率极低，但真撞了就重试一次。
+  let created = null;
+  for (let attempt = 0; attempt < 2 && !created; attempt++) {
+    const code = 'custom_' + Date.now().toString(36).slice(-6) + (attempt ? Math.floor(Math.random() * 36).toString(36) : '');
+    const r = await db.insertItemType({ code, label, color, sortOrder: 100, updatedBy: gate.actor.mid });
+    if (r.error) { if (!r.conflict) return { ok: false, data: null, error: { code: 500, message: `新增类型失败：${r.message || '未知原因'}` } }; }
+    else created = r.type;
+  }
+  if (!created) return { ok: false, data: null, error: { code: 409, message: '类型编号生成冲突，请重试一次' } };
+
+  invalidateTypeCache();
+  return { ok: true, data: created, error: null };
+}
+
+// POST ?_action=updatetype —— 改名字 / 改颜色（core）。内置类型也能改（它就是"调整语义色"）。
+async function updateItemTypeEndpoint(event) {
+  const gate = await requireCore(event);
+  if (gate.error) return { ok: false, data: null, error: gate.error };
+  const body = getBody(event);
+
+  const code = String(body.code || '').trim();
+  if (!code) return { ok: false, data: null, error: { code: 400, message: '缺少必填字段：类型编号' } };
+  const cur = await db.findItemTypeByCode(code);
+  if (!cur) return { ok: false, data: null, error: { code: 404, message: '类型不存在' } };
+
+  const patch = {};
+  if (body.label !== undefined) {
+    const label = String(body.label).trim();
+    if (!label) return { ok: false, data: null, error: { code: 400, message: '类型名称不能为空' } };
+    if (label.length > 12) return { ok: false, data: null, error: { code: 400, message: '类型名称最长 12 个字' } };
+    if (label !== cur.label) {
+      const all = await db.listItemTypes().catch(() => []);
+      if (all.some(t => t.label === label && t.code !== code)) {
+        return { ok: false, data: null, error: { code: 409, message: `已有同名类型「${label}」，请换个名字` } };
+      }
+    }
+    patch.label = label;
+  }
+  if (body.color !== undefined) {
+    const color = normalizeHex(body.color);
+    if (!color) return { ok: false, data: null, error: { code: 400, message: '颜色格式应为 #RRGGBB（如 #1d4ed8）' } };
+    const ratio = whiteContrast(color);
+    if (ratio < 4.5) {
+      return { ok: false, data: null, error: { code: 422, message: `颜色太浅：白字对比度只有 ${ratio.toFixed(1)}:1，低于 4.5:1 会看不清，请选深一点的色` } };
+    }
+    patch.color = color;
+  }
+  if (!Object.keys(patch).length) {
+    return { ok: false, data: null, error: { code: 400, message: '没有要修改的字段：请至少传 label 或 color' } };
+  }
+
+  const updated = await db.updateItemType(code, { ...patch, updatedBy: gate.actor.mid });
+  if (!updated) return { ok: false, data: null, error: { code: 404, message: '类型不存在' } };
+  invalidateTypeCache();
+  return { ok: true, data: updated, error: null };
+}
+
+// POST ?_action=deletetype —— 删除自定义类型（core）。内置不可删；还有日程在用的不可删。
+async function deleteItemTypeEndpoint(event) {
+  const gate = await requireCore(event);
+  if (gate.error) return { ok: false, data: null, error: gate.error };
+  const body = getBody(event);
+
+  const code = String(body.code || '').trim();
+  if (!code) return { ok: false, data: null, error: { code: 400, message: '缺少必填字段：类型编号' } };
+  const cur = await db.findItemTypeByCode(code);
+  if (!cur) return { ok: false, data: null, error: { code: 404, message: '类型不存在' } };
+  if (cur.builtin) {
+    return { ok: false, data: null, error: { code: 403, message: '内置类型不能删除（库里已有历史日程在用），可以改颜色或改名称' } };
+  }
+
+  // 引用检查跨全部团队：类型是全局的，只查本团队会漏掉别人在用的
+  const used = await db.countItemsByType(code);
+  if (used < 0) {
+    return { ok: false, data: null, error: { code: 500, message: '无法确认还有多少日程在用这个类型，为安全起见暂不允许删除' } };
+  }
+  if (used > 0) {
+    return { ok: false, data: null, error: { code: 409, message: `还有 ${used} 条日程在用「${cur.label}」，请先把它们改成其他类型再删除` } };
+  }
+
+  const removed = await db.deleteItemType(code);
+  if (!removed) return { ok: false, data: null, error: { code: 404, message: '类型不存在或为内置类型' } };
+  invalidateTypeCache();
+  return { ok: true, data: { code, removed: true }, error: null };
+}
+
 // GET ?_action=team —— 我自己所在的团队（任何登录成员都能看；joinCode 只给 admin）
 async function teamInfo(event) {
   const actor = await resolveActor(event);
@@ -1183,6 +1392,40 @@ async function handle(event = {}) {
     try { return http(event, await addMember(event)); }
     catch (err) {
       logError('POST /api/addMember', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
+    }
+  }
+
+  // 【2026-10-28】类型与颜色：读公开、写限 core
+  if (action === 'types' && method === 'GET') {
+    try { return http(event, await listTypes(event)); }
+    catch (err) {
+      logError('GET /api/types', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
+    }
+  }
+  if (action === 'addtype' && method === 'POST') {
+    try { return http(event, await addItemType(event)); }
+    catch (err) {
+      logError('POST /api/addType', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
+    }
+  }
+  if (action === 'updatetype' && method === 'POST') {
+    try { return http(event, await updateItemTypeEndpoint(event)); }
+    catch (err) {
+      logError('POST /api/updateType', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
+    }
+  }
+  if (action === 'deletetype' && method === 'POST') {
+    try { return http(event, await deleteItemTypeEndpoint(event)); }
+    catch (err) {
+      logError('POST /api/deleteType', err);
       const e = toUserError(err);
       return http(event, { ok: false, data: null, error: e }, e.code);
     }
