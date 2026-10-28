@@ -990,6 +990,60 @@ async function countItemsByType(code) {
   return Array.isArray(rows) ? rows.length : -1;
 }
 
+/* ============ 【2026-10-28】解散团队：级联清理 ============
+   为什么用应用层级联而不是数据库外键 ON DELETE CASCADE：
+     schema 里 items/members_phase2/audit_phase2 的 team_id 是**可空、无外键**的
+     （多团队上线时刻意如此，为了让回滚期间旧代码写入的 NULL 行不至于炸）。
+     现在补外键需要先确认"存量 team_id 全部指向存在的团队"，一旦有孤儿行就加不上，
+     而加不上意味着部署卡住。应用层级联虽然啰嗦，但不引入迁移风险。
+   ⚠️ 顺序有讲究：先删子表再删团队本体。反过来的话中途失败会留下"团队已消失、
+     数据还在"的幽灵行——最难查的一类脏数据。 */
+async function deleteByTeam(table, teamId) {
+  const tid = requireTeamId(teamId, 'deleteByTeam');
+  const token = await getBearer();
+  const p = new URLSearchParams();
+  p.set('team_id', `eq.${tid}`);
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/${table}?${p.toString()}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}`, 'Accept-Profile': SCHEMA, 'Content-Profile': SCHEMA, 'Prefer': 'return=representation' },
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`清理 ${table} 失败（HTTP ${res.status}）${text.slice(0, 120)}`);
+  }
+  const rows = await res.json().catch(() => []);
+  return Array.isArray(rows) ? rows.length : 0;
+}
+
+async function countItemsByTeam(teamId) {
+  const tid = requireTeamId(teamId, 'countItemsByTeam');
+  const token = await getBearer();
+  const p = new URLSearchParams();
+  p.set('select', 'id');
+  p.set('team_id', `eq.${tid}`);
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/items?${p.toString()}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}`, 'Accept': 'application/json', 'Accept-Profile': SCHEMA },
+  });
+  if (!res.ok) return -1;
+  const rows = await res.json().catch(() => []);
+  return Array.isArray(rows) ? rows.length : -1;
+}
+
+async function deleteTeamById(teamId) {
+  const tid = requireTeamId(teamId, 'deleteTeamById');
+  const token = await getBearer();
+  const p = new URLSearchParams();
+  p.set('id', `eq.${tid}`);
+  const res = await fetch(`${GATEWAY}/v1/rdb/rest/teams_phase2?${p.toString()}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}`, 'Accept-Profile': SCHEMA, 'Content-Profile': SCHEMA, 'Prefer': 'return=representation' },
+  });
+  if (!res.ok) throw new Error(`删除团队失败（HTTP ${res.status}）`);
+  const rows = await res.json().catch(() => []);
+  return Array.isArray(rows) ? rows.length : 0;
+}
+
 module.exports = {
   queryItems,
   findDuplicate,
@@ -1025,4 +1079,8 @@ module.exports = {
   updateItemType,
   deleteItemType,
   countItemsByType,
+  // 【2026-10-28】解散团队
+  deleteByTeam,
+  countItemsByTeam,
+  deleteTeamById,
 };

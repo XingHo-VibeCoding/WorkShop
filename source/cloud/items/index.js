@@ -254,6 +254,14 @@ async function requireWriter(event) {
   if (!actor) {
     return { error: { code: 401, message: '请先登录后再修改日程' } };
   }
+  // 【2026-10-28】团队可能已经解散：令牌是 HMAC 签的、7 天有效，**没法吊销**。
+  // 不挡的话，解散后成员手里那个还没过期的令牌仍然能写，写出来的行 team_id
+  // 指向一个不存在的团队 —— 那种数据谁都看不见，等于凭空消失。
+  // 代价是每次写入多一次团队查询；写入本来就不频繁，换这个确定性是值得的。
+  const team = await db.findTeamById(actor.teamId).catch(() => null);
+  if (!team) {
+    return { error: { code: 401, message: '所在团队已解散，请重新注册或联系管理员' } };
+  }
   return { actor };
 }
 
@@ -1207,6 +1215,74 @@ async function deleteItemTypeEndpoint(event) {
   return { ok: true, data: { code, removed: true }, error: null };
 }
 
+/* ============ 【2026-10-28】解散团队 ============
+   用户的决策（2026-10-28）：「整个团队都解散了的话，日程就在他们自己手里，
+   团队就可以直接删除了」—— 即**不做数据交接**，删团队就是真删，成员自己事先导出。
+
+   因此这个端点的设计重点不是"防止删除"，而是**让删除前一刻的信息足够明确**：
+     · 必须原样输入团队名（不是勾个"我确认"，手滑概率更低）
+     · 响应里如实回传删掉了多少条日程 / 多少成员
+     · 前端还会强制提供一个"先导出全部日程"的按钮（服务端无法验证用户是否导出过，
+       所以那条只能靠界面拦一道）
+
+   权限：本团队 admin 或 core。core 一般不删别人的团队数据，但既然它是全局超管，
+   留这个口子免得"团队 admin 账号丢了"时整个团队永久删不掉。 */
+async function deleteTeamEndpoint(event) {
+  const body = getBody(event);
+  const actor = await resolveActor(event);
+  if (!actor) return { ok: false, data: null, error: { code: 401, message: '请先登录后再解散团队' } };
+  const role = String(actor.role || '');
+  if (role !== 'admin' && role !== 'core') {
+    return { ok: false, data: null, error: { code: 403, message: '只有团队管理员可以解散团队' } };
+  }
+
+  const team = await db.findTeamById(actor.teamId);
+  if (!team) return { ok: false, data: null, error: { code: 404, message: '团队不存在（可能已被解散）' } };
+
+  const confirmName = String(body.confirmName || '').trim();
+  if (!confirmName) {
+    return { ok: false, data: null, error: { code: 400, message: `请输入团队名「${team.name}」以确认解散` } };
+  }
+  if (confirmName !== team.name) {
+    return { ok: false, data: null, error: { code: 400, message: '输入的团队名不一致，已取消（日程没有任何改动）' } };
+  }
+
+  // 先统计再删：删完就查不到了，得先留一份数字给响应和日志
+  const itemCount = await db.countItemsByTeam(actor.teamId);
+  const memberCount = await db.countTeamMembers(actor.teamId);
+
+  // 顺序：items → audit → members → team。反过来的话中途失败会留下
+  // "团队没了、数据还在"的幽灵行，那种脏数据最难查。
+  let removedItems = 0, removedMembers = 0;
+  try {
+    removedItems = await db.deleteByTeam('items', actor.teamId);
+    await db.deleteByTeam('audit_phase2', actor.teamId);
+    removedMembers = await db.deleteByTeam('members_phase2', actor.teamId);
+    await db.deleteTeamById(actor.teamId);
+  } catch (err) {
+    // 级联到一半失败：如实告知，别让用户以为删干净了
+    console.error('[解散团队] 清理中断', { teamId: actor.teamId, removedItems, removedMembers, err: err && err.message });
+    return {
+      ok: false, data: null,
+      error: { code: 500, message: `解散未完成：已删除 ${removedItems} 条日程，后续清理失败。请联系管理员在控制台处理（团队尚未删除）` },
+    };
+  }
+
+  // audit 表已随团队清空，留痕只能进运行日志
+  console.log('[解散团队] 完成', { teamId: actor.teamId, teamName: team.name, by: actor.mid, items: removedItems, members: removedMembers });
+
+  return {
+    ok: true,
+    data: {
+      team: { id: team.id, name: team.name },
+      deleted: { items: removedItems, members: removedMembers },
+      // 如实说明：这些成员的令牌要 7 天才自然过期，但写操作已被 requireWriter 挡住
+      note: '团队成员记录与日程已删除。成员手中的登录令牌会在 7 天后自然过期，其间无法写入任何数据。',
+    },
+    error: null,
+  };
+}
+
 // GET ?_action=team —— 我自己所在的团队（任何登录成员都能看；joinCode 只给 admin）
 async function teamInfo(event) {
   const actor = await resolveActor(event);
@@ -1426,6 +1502,16 @@ async function handle(event = {}) {
     try { return http(event, await deleteItemTypeEndpoint(event)); }
     catch (err) {
       logError('POST /api/deleteType', err);
+      const e = toUserError(err);
+      return http(event, { ok: false, data: null, error: e }, e.code);
+    }
+  }
+
+  // 【2026-10-28】解散团队（本团队 admin / core；硬删，级联清日程与成员）
+  if (action === 'deleteteam' && method === 'POST') {
+    try { return http(event, await deleteTeamEndpoint(event)); }
+    catch (err) {
+      logError('POST /api/deleteTeam', err);
       const e = toUserError(err);
       return http(event, { ok: false, data: null, error: e }, e.code);
     }

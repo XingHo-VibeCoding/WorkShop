@@ -117,8 +117,12 @@ async function loadTypeList() {
       headers: (window.Auth ? window.Auth.withHeaders({}) : {}),
     });
     const j = await res.json();
-    if (!res.ok || !j || !j.ok || !Array.isArray(j.data) || !j.data.length) {
+    if (!res.ok || !j || !j.ok) {
       throw new Error((j && j.error && j.error.message) || `HTTP ${res.status}`);
+    }
+    // 旧版后端不认 _action=types，会落到默认 GET 返回 items 列表 —— 那种情况这里是空数组
+    if (!Array.isArray(j.data) || !j.data.length) {
+      throw new Error('类型清单为空（后端可能未升级到含类型表的版本，或 SQL 未执行）');
     }
     applyTypeTheme(j.data);
     _typesLoaded = true;
@@ -259,6 +263,9 @@ function applyRoleUI() {
   // 【2026-10-28】type：新增类型表单只对核心管理员显示（服务端 requireCore 兜底）
   const typeAdd = document.getElementById('type-add');
   if (typeAdd) typeAdd.hidden = !isCore();
+  // 【2026-10-28】解散团队：本团队 admin 或 core（服务端再判一次）
+  const disband = document.getElementById('team-disband');
+  if (disband) disband.hidden = !(isAdmin() || isCore());
 }
 
 // ---- [Day 20] 真实 API 接线：loadItems 从 mock 切换为调用公网接口 ----
@@ -1743,6 +1750,86 @@ async function doUndo() {
   if (bar) bar.hidden = true;
 }
 
+/* ============ 【2026-10-28】换团队 / 解散团队 ============
+   用户拍板的语义（2026-10-28）：
+     · 换团队 → 把日程导出成文件 + 弹窗提醒「到新团队导入即可」，**不改后端 team_id**
+       （一个人只属于一个团队，做"迁移审批流"性价比太低；导出再导入已经够了）
+     · 解散团队 → 日程留在成员自己手里（各自导出），团队直接删，不做交接
+
+   为什么"导出我的"只导自己的：整个团队的数据在别人手里也有，导出来反而是一份
+   重复的脏数据（导入时全被判成重复项）。每人导自己的，合起来正好是一整个团队。 */
+async function exportMine() {
+  const me = window.Auth && typeof window.Auth.currentMember === 'function' ? window.Auth.currentMember() : null;
+  if (!me) { showToast('请先登录'); return; }
+  const btn = document.getElementById('btn-export-mine');
+  const hint = document.getElementById('export-mine-hint');
+  if (btn) btn.disabled = true;
+  try {
+    // 全量范围（与导出模块一致）：不依赖"无参数默认全量"的实现细节
+    const url = `${API_BASE}/api/items?start=2000-01-01 00:00&end=2100-12-31 23:59`;
+    const res = await fetch(url, { headers: (window.Auth ? window.Auth.withHeaders({}) : {}) });
+    const j = await res.json();
+    if (!res.ok || !j || !j.ok) throw new Error((j && j.error && j.error.message) || `HTTP ${res.status}`);
+    const all = Array.isArray(j.data) ? j.data : [];
+    const mine = all.filter(it => Number(it.ownerMemberId) === Number(me.id));
+    if (!mine.length) {
+      showToast('你名下还没有日程，无需导出');
+      if (hint) { hint.hidden = false; hint.textContent = '当前账号名下 0 条日程。若你确认有日程但这里显示 0，说明那些日程的归属人不是你（历史数据可能没有归属）。'; }
+      return;
+    }
+    if (!window.Export2 || typeof window.Export2.toJSON !== 'function' || typeof window.Export2.download !== 'function') {
+      throw new Error('导出模块未加载，请刷新页面后重试');
+    }
+    const content = window.Export2.toJSON(mine);
+    const stamp = `${new Date().getFullYear()}${String(new Date().getMonth() + 1).padStart(2, '0')}${String(new Date().getDate()).padStart(2, '0')}`;
+    window.Export2.download(`workshop-我的日程-${me.name || 'me'}-${stamp}.json`, content, 'application/json');
+    if (hint) {
+      hint.hidden = false;
+      hint.innerHTML =
+        `已导出 <b>${mine.length}</b> 条（只含你名下的）。<br>` +
+        `下一步：① 用新团队的邀请码注册/登录 → ② 点顶部「导入」→ ③ 选这个文件。` +
+        `<br><span style="color:var(--ink-soft)">导入时同团队内的重复项会被自动跳过，不会覆盖已有日程。</span>`;
+    }
+    showToast(`已导出 ${mine.length} 条我的日程`);
+  } catch (e) {
+    showToast('导出失败：' + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function disbandTeam() {
+  const errEl = document.getElementById('disband-err');
+  const btn = document.getElementById('btn-disband-team');
+  const input = document.getElementById('disband-confirm');
+  const showErr = msg => { if (errEl) { errEl.hidden = false; errEl.textContent = msg; } showToast(msg); };
+  if (errEl) errEl.hidden = true;
+
+  if (!isAdmin() && !isCore()) { showErr('只有团队管理员可以解散团队'); return; }
+  const typed = (input && input.value || '').trim();
+  const teamNameEl = document.getElementById('team-name');
+  const realName = (teamNameEl && teamNameEl.textContent || '').trim();
+  if (!typed) { showErr(`请输入团队名「${realName}」以确认`); if (input) input.focus(); return; }
+  if (typed !== realName) { showErr('输入的团队名不一致，已取消（日程没有任何改动）'); return; }
+
+  // 二次确认：即使名字输对了，也要再点一次 —— 这是不可恢复操作里唯一值钱的一步
+  if (!window.confirm(`最后一次确认：解散「${realName}」？\n\n本团队的全部日程与成员账号会被永久删除，无法恢复。\n请确认每位成员都已导出自己的日程。`)) return;
+
+  if (btn) btn.disabled = true;
+  try {
+    const data = await apiMutate('POST', `${API_BASE}/api/items?_action=deleteteam`, { confirmName: typed });
+    const d = (data && data.deleted) || {};
+    // 团队没了，当前令牌已经无意义：就地清掉本地身份，回到匿名只读态
+    if (window.Auth && typeof window.Auth.logout === 'function') window.Auth.logout();
+    closeSettings();
+    showToast(`团队已解散（删除日程 ${d.items || 0} 条、成员 ${d.members || 0} 个）`);
+    setTimeout(() => location.reload(), 1200);
+  } catch (e) {
+    showErr('解散失败：' + e.message);
+    if (btn) btn.disabled = false;
+  }
+}
+
 function deleteItem(id) {
   const it = items.find(x => x.id === id);
   if (!it) return;
@@ -1981,6 +2068,9 @@ document.getElementById('btn-batch-delete').addEventListener('click', () => open
 document.getElementById('btn-batch-exit').addEventListener('click', () => exitSelectMode());
 // 【2026-10-28】新增日程类型（仅核心管理员；服务端 requireCore 兜底）
 document.getElementById('btn-add-type').addEventListener('click', () => submitAddType());
+// 【2026-10-28】换团队：导出我名下的日程；解散团队：不可恢复，双确认
+document.getElementById('btn-export-mine').addEventListener('click', () => exportMine());
+document.getElementById('btn-disband-team').addEventListener('click', () => disbandTeam());
 document.getElementById('btn-undo').addEventListener('click', () => doUndo());
 document.getElementById('btn-undo-close').addEventListener('click', () => clearUndo());
 // Esc 退出批量模式（未删任何东西，纯退出，不需要确认）

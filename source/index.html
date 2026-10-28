@@ -214,6 +214,32 @@
 
           <hr>
 
+          <!-- [2026-10-28] 换团队 / 解散团队（用户拍板：换团队＝自己导出→新团队导入；
+               解散＝成员先各自留底，然后团队直接删，不做数据交接） -->
+          <section class="set-section" id="transfer-section">
+            <h4>换团队 / 解散团队</h4>
+            <p class="set-hint">本系统里一个人只属于一个团队，「换团队」不是一键搬家。正确顺序是：
+              <b>① 先把你的日程导出成文件 → ② 加入新团队 → ③ 在新团队里点顶部「导入」选这个文件</b>。
+              原团队里的旧日程不会自动消失，确认迁出后请让原团队管理员移出你的账号。</p>
+            <div class="set-actions">
+              <button id="btn-export-mine">导出我的日程（换团队用）</button>
+            </div>
+            <p class="set-hint" id="export-mine-hint" hidden></p>
+
+            <div id="team-disband" hidden>
+              <h4 class="member-admin-sub">解散本团队（危险操作）</h4>
+              <p class="set-hint">解散会<b>永久删除本团队的全部日程与成员账号，无法恢复</b>。
+                请先让每位成员各自「导出我的日程」留底 —— 解散之后没有任何办法找回。</p>
+              <div class="member-add">
+                <input id="disband-confirm" type="text" placeholder="输入团队名以确认" aria-label="输入团队名确认解散">
+                <button class="btn-danger" id="btn-disband-team">解散团队</button>
+              </div>
+              <p class="set-err" id="disband-err" hidden></p>
+            </div>
+          </section>
+
+          <hr>
+
           <section class="set-section">
             <h4>3 · 通用</h4>
             <label class="set-row">默认启动视图
