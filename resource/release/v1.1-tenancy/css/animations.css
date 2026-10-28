@@ -1,0 +1,27 @@
+/* ===== [Day 13] 动效：周切换方向滑动 + 视图切换 + 拖拽视觉 ===== */
+
+/* 周切换：旧周滑出后，新周从对应方向滑入（与「上周/下周」按钮方向一致） */
+@keyframes wkEnterFwd  { from { opacity: 0; transform: translateX(28px); }  to { opacity: 1; transform: none; } }
+@keyframes wkEnterBack { from { opacity: 0; transform: translateX(-28px); } to { opacity: 1; transform: none; } }
+.wk-enter-fwd  { animation: wkEnterFwd 260ms ease; }
+.wk-enter-back { animation: wkEnterBack 260ms ease; }
+
+/* 视图切换：时间线 <-> 总览 交叉滑动 */
+@keyframes viewEnterFwd  { from { opacity: 0; transform: translateX(24px); }  to { opacity: 1; transform: none; } }
+@keyframes viewEnterBack { from { opacity: 0; transform: translateX(-24px); } to { opacity: 1; transform: none; } }
+.view-enter-fwd  { animation: viewEnterFwd 240ms ease; }
+.view-enter-back { animation: viewEnterBack 240ms ease; }
+
+/* 拖拽视觉：源卡片半透明、落点高亮 */
+.item { cursor: grab; transition: box-shadow .15s ease, opacity .15s ease; }
+.item.dragging { opacity: .4; cursor: grabbing; }
+.day-col.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.sheet-tabs button.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -3px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}

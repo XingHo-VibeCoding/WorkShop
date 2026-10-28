@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WorkShop 会议工作台</title>
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/animations.css">
+</head>
+<body>
+  <!-- 上栏：应用标题 + 全局操作 -->
+  <header class="topbar">
+    <!-- [Day 26] 版本标识：发布 v1.0 起对外可见，用于回滚演练时肉眼/脚本判定线上跑的是哪一版 -->
+    <div class="brand">WorkShop <span class="brand-sub">会议工作台</span><span class="version-tag" id="app-version">v1.0</span></div>
+    <div class="week-range" id="week-range">—</div>
+    <div class="actions">
+      <button id="btn-prev-week">‹ 上周</button>
+      <button id="btn-next-week">下周 ›</button>
+      <button id="btn-new" class="primary">+ 新建</button>
+      <button id="btn-settings" title="打开设置：自定义部门、标记、类型颜色、默认视图、导入导出">设置</button>
+      <button id="btn-import" title="导入日程（JSON）；图片/Excel 识别待第 3 周 OCR 接入">导入</button>
+      <!-- [阶段二 P10] 顶栏「导出」下拉：CSV / JSON / 腾讯文档 -->
+      <button id="btn-export" title="导出日程：CSV / JSON / 腾讯文档">导出 ▾</button>
+      <div id="export-menu" class="export-menu" hidden>
+        <button id="export-csv" type="button">导出 CSV</button>
+        <button id="export-json" type="button">导出 JSON</button>
+        <button id="export-doc" type="button">导出到腾讯文档</button>
+      </div>
+      <!-- [Day 27] 手动刷新（后手，非主流程）：增删改后界面本已自动更新，此按钮只作兜底入口。
+           来源：第三方试用时用户想确认"刚才那条是不是真的存住了"，却找不到任何入口（只能按 F5）。
+           与内部检查台 check.html 的「刷新数据」对齐。 -->
+      <button id="btn-refresh" title="重新从云端拉取最新数据（正常增删改后会自动更新，这里只是手动兜底）">↻ 刷新</button>
+      <span id="identity-zone" class="identity-zone"></span>
+    </div>
+  </header>
+
+  <!-- [Day 13] 视图导航（Hash 路由）：时间线 / 总览 两个可独立访问视图，地址栏 #/timeline|#/overview -->
+  <nav class="view-nav" id="view-nav">
+    <a href="#/timeline" data-view="timeline">时间线</a>
+    <a href="#/overview" data-view="overview">总览</a>
+  </nav>
+
+  <!-- 内容区：三个视图 + 全局状态层（loading / empty / error 覆盖其上） -->
+  <div class="content" id="content">
+
+    <!-- 视图 1：周时间线（核心，承载四状态） -->
+    <section id="view-timeline" class="view">
+      <!-- [Day 12] 筛选条：类型 + 关键词（纯前端过滤，不依赖后端） -->
+      <div class="filter-bar" role="search" aria-label="筛选时间线事项">
+        <label class="filter-field">
+          <span class="filter-label">类型</span>
+          <select id="filter-type" aria-label="按类型筛选事项">
+            <option value="all">全部</option>
+            <option value="meeting">会议</option>
+            <option value="trip">行程</option>
+            <option value="pending">待安排</option>
+            <option value="class">课表</option>
+            <option value="sport">运动</option>
+            <option value="life">生活</option>
+          </select>
+        </label>
+        <label class="filter-field">
+          <span class="filter-label">关键词</span>
+          <input id="filter-keyword" type="search" placeholder="搜索标题" aria-label="按关键词搜索事项标题">
+        </label>
+        <button id="filter-clear" class="filter-clear" aria-label="清空筛选条件，恢复全部事项">清空筛选</button>
+      </div>
+
+      <!-- 主体：左时间线(主栏) / 右详情(侧栏) -->
+      <main class="layout">
+        <section class="timeline" id="timeline" aria-label="周时间线">
+          <!-- 7 天分列由 JS 渲染 -->
+        </section>
+        <aside class="detail" id="detail">
+          <!-- [Day 25] 移动端可拖动底部抽屉：手柄常驻，内容体由 JS 注入；桌面端手柄隐藏、详情常驻右栏 -->
+          <div class="sheet-handle" id="sheet-handle" role="button" tabindex="0" aria-label="拖动调整面板高度：上拖展开、下拖收起或关闭；点按在展开与收起间切换">
+            <span class="sheet-grip"></span>
+          </div>
+          <div class="detail-body" id="detail-body">
+            <p class="detail-empty">点击时间线上的事项查看详情。</p>
+          </div>
+        </aside>
+        <!-- [Day 24 修复] 移动端底部抽屉遮罩：点它收起详情；此前 HTML 漏写此节点，抽屉打开后无遮罩、无法点按关闭 -->
+        <div class="detail-scrim"></div>
+      </main>
+
+      <!-- 页面底部：表签切换（仿 Excel） -->
+      <nav class="sheet-tabs" id="sheet-tabs">
+        <button data-mode="work" class="active">工作事项表</button>
+        <button data-mode="daily">日常事项表</button>
+        <button data-mode="all">总表</button>
+      </nav>
+    </section>
+
+    <!-- 设置弹窗（Day 9）：自定义部门 / 标记 / 类型颜色 / 默认视图 / 数据导入导出 -->
+    <div class="modal-overlay" id="settings-modal" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-label="设置">
+        <div class="modal-head">
+          <h2>设置</h2>
+          <button class="modal-close" id="btn-settings-close" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="set-hint">所有配置暂存于浏览器内存，刷新页面会重置；接入腾讯文档后自动改为云端保存（见 PRD §6）。</p>
+
+          <section class="set-section">
+            <h4>1 · 自定义部门与标记</h4>
+            <ul class="owner-list" id="owner-list"></ul>
+            <div class="owner-add">
+              <input id="new-owner-name" type="text" placeholder="部门名称" aria-label="新部门名称">
+              <input id="new-owner-mark" type="text" placeholder="符号" maxlength="2" style="width:56px" aria-label="新部门记号">
+              <button class="primary" id="btn-add-owner">+ 新增部门</button>
+            </div>
+            <div class="set-actions">
+              <button id="btn-export-owners">导出部门配置</button>
+              <button id="btn-import-owners">导入部门配置</button>
+              <input type="file" id="file-import-owners" accept="application/json" hidden>
+            </div>
+          </section>
+
+          <hr>
+
+          <section class="set-section">
+            <h4>2 · 类型颜色</h4>
+            <p class="set-hint">调整 6 个类型色；白字需 ≥4.5:1（低于会提示，防止调回不达标浅色）。</p>
+            <div id="color-list"></div>
+          </section>
+
+          <hr>
+
+          <section class="set-section" id="meeting-settings">
+            <h4>我的腾讯会议（方案① · 固定个人会议号）</h4>
+            <p class="set-hint">填一次你的固定会议号与入会链接，新建/编辑会议日程会自动带入。所有人共用同一会议室，可能撞会。</p>
+            <label class="set-row">会议号
+              <input id="me-meeting-no" type="text" maxlength="60" placeholder="如 559 104 286" aria-label="个人会议号">
+            </label>
+            <label class="set-row">入会链接
+              <input id="me-meeting-url" type="url" placeholder="https://meeting.tencent.com/dm/..." aria-label="个人入会链接">
+            </label>
+            <p class="set-err" id="me-meeting-err" hidden></p>
+            <div class="set-actions">
+              <button class="primary" id="btn-save-meeting">保存我的会议信息</button>
+            </div>
+          </section>
+
+          <hr>
+
+          <!-- [阶段二 Step5 口令体系 2026-10-23] 任意登录成员可见（applyRoleUI 控显隐）：
+               自助改口令仅本人知晓（管理员也不可查看，与 resetPasscode 互补） -->
+          <section class="set-section" id="passcode-settings" hidden>
+            <h4>修改我的口令</h4>
+            <p class="set-hint">自助修改的口令<b>仅本人知晓</b>（管理员也不可查看）。新口令至少 6 位；修改后旧令牌 7 天内仍有效，建议重新登录。</p>
+            <label class="set-row">当前口令
+              <input id="pc-old" type="password" autocomplete="current-password" placeholder="输入当前口令" aria-label="当前口令">
+            </label>
+            <label class="set-row">新口令
+              <input id="pc-new" type="password" autocomplete="new-password" placeholder="至少 6 位" aria-label="新口令">
+            </label>
+            <label class="set-row">确认新口令
+              <input id="pc-new2" type="password" autocomplete="new-password" placeholder="再输一次新口令" aria-label="确认新口令">
+            </label>
+            <p class="set-err" id="pc-err" hidden></p>
+            <div class="set-actions">
+              <button class="primary" id="btn-save-passcode">修改口令</button>
+            </div>
+          </section>
+
+          <hr>
+
+          <!-- [阶段二 管理员 UI 2026-10-18] 仅 admin 登录时由 JS 显示（applyRoleUI） -->
+          <section class="set-section" id="member-admin" hidden>
+            <h4>成员管理（管理员）</h4>
+            <p class="set-hint">修改成员角色后，该成员需<b>重新登录</b>方可生效（令牌 7 天有效，期内仍持原角色）。不能修改自己的角色。</p>
+            <div class="member-admin-list" id="member-admin-list"></div>
+            <p class="set-err" id="member-admin-err" hidden></p>
+            <div class="set-actions">
+              <button class="primary" id="btn-save-roles">保存角色更改</button>
+            </div>
+            <!-- [阶段二 Step5 2026-10-23] 添加成员：初始口令随机生成，成功后一次性展示 -->
+            <h4 class="member-admin-sub">添加成员</h4>
+            <div class="member-add">
+              <input id="new-member-name" type="text" placeholder="成员名称" maxlength="30" aria-label="新成员名称">
+              <select id="new-member-role" aria-label="新成员角色">
+                <option value="member">普通成员</option>
+                <option value="readonly">只读成员</option>
+              </select>
+              <button id="btn-add-member">+ 添加成员</button>
+            </div>
+            <p class="set-err" id="member-add-err" hidden></p>
+
+            <!-- [2026-10-27 多团队] 团队信息 + 建团队：团队码即邀请码，别人拿它自助加入 -->
+            <h4 class="member-admin-sub">团队</h4>
+            <p class="set-hint">不同团队的数据<b>完全隔离</b>，互相看不到对方的日程。把团队码发给同事，他们在登录页点「用团队邀请码加入」即可。</p>
+            <div class="team-box">
+              <p class="team-line">当前团队：<b id="team-name">—</b></p>
+              <p class="team-line">团队邀请码：<code id="team-code" class="team-code">—</code>
+                <button type="button" class="ghost tiny" id="btn-copy-team-code">复制</button></p>
+            </div>
+            <div class="member-add">
+              <input id="new-team-name" type="text" placeholder="新团队名称（如 产品部）" maxlength="60" aria-label="新团队名称">
+              <button id="btn-create-team">+ 创建团队</button>
+            </div>
+            <p class="set-err" id="team-err" hidden></p>
+          </section>
+
+          <hr>
+
+          <section class="set-section">
+            <h4>3 · 通用</h4>
+            <label class="set-row">默认启动视图
+              <select id="set-default-view">
+                <option value="work">工作事项表</option>
+                <option value="daily">日常事项表</option>
+                <option value="all">总表</option>
+              </select>
+            </label>
+            <h4>日程数据（JSON 导入/导出）</h4>
+            <div class="set-actions">
+              <button id="btn-export-data">导出全部日程</button>
+              <button id="btn-import-data">导入日程</button>
+              <input type="file" id="file-import-data" accept="application/json" hidden>
+            </div>
+            <p class="set-hint">顶部「导入」按钮同样走 JSON；图片 / Excel 识别待第 3 周 OCR 接入。</p>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <!-- 视图 3：周总览 / 空闲时间（设想②，纯前端统计现有 items，半小时粒度） -->
+    <section id="view-overview" class="view" hidden>
+      <div id="overview-body"></div>
+    </section>
+
+    <!-- 全局状态层：loading / empty / error 覆盖三视图（四状态机） -->
+    <div class="state-layer" id="global-state" hidden>
+      <div class="state-panel" data-state="loading">
+        <div class="skeleton-grid">
+          <div class="skeleton-col"></div><div class="skeleton-col"></div>
+          <div class="skeleton-col"></div><div class="skeleton-col"></div>
+          <div class="skeleton-col"></div><div class="skeleton-col"></div>
+          <div class="skeleton-col"></div>
+        </div>
+        <p class="state-text">正在加载本周日程…</p>
+      </div>
+      <div class="state-panel" data-state="empty" hidden>
+        <div class="state-icon">🗓️</div>
+        <p class="state-title">本周还没有安排</p>
+        <p class="state-text">点击「+ 新建」添加第一个事项；导入识别接入后可一键导入图片 / 表格。</p>
+        <button class="btn-primary" id="btn-empty-new">+ 新建事项</button>
+      </div>
+      <div class="state-panel" data-state="error" hidden>
+        <div class="state-icon">⚠️</div>
+        <p class="state-title">加载失败</p>
+        <p class="state-text" id="error-msg">日程数据加载出错，请重试。</p>
+        <button class="btn-primary" id="btn-retry">重新加载</button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- 一次性口令展示弹窗（Step5 2026-10-23）：重置/添加成员成功后，新口令明文只展示这一次 -->
+  <div class="modal-overlay" id="passcode-modal" hidden>
+    <div class="modal modal-sm" role="dialog" aria-modal="true" aria-label="新口令">
+      <div class="modal-head">
+        <h2 id="pc-modal-title">新口令</h2>
+        <button class="modal-close" id="btn-pc-modal-close" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <p class="set-hint" id="pc-modal-hint"></p>
+        <div class="passcode-display" id="pc-modal-value"></div>
+        <div class="set-actions">
+          <button class="primary" id="btn-pc-copy">复制口令</button>
+          <button id="btn-pc-modal-done">完成</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 下栏：状态栏 -->
+  <footer class="statusbar">
+    <span id="stat-week">当前周：—</span>
+    <span id="stat-week-hint"></span>
+    <span id="stat-count">事项：0</span>
+    <span id="stat-overlap">重叠：无</span>
+    <!-- [阶段二 在线人数 2026-10-18] 心跳近似：登录成员 30s 上报一次，2 分钟窗口内有心跳算在线 -->
+    <span id="stat-online" title="在线人数：登录成员 30 秒上报一次心跳，2 分钟窗口内有心跳计为在线">在线：—</span>
+    <span id="stat-sync">同步状态：本地内存（未接入腾讯文档）</span>
+  </footer>
+
+  <!-- 阶段二 P8：成员登录弹窗 -->
+  <div class="modal-overlay" id="login-modal" hidden>
+    <div class="modal login-card" role="dialog" aria-modal="true" aria-labelledby="login-title">
+      <div class="modal-head login-head">
+        <h2 id="login-title">成员登录</h2>
+        <button class="modal-close" id="login-close" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body login-body">
+        <p class="login-sub">登录后，你新建 / 修改的日程会带上你的归属标记，便于多人协作时区分「谁的」。</p>
+        <form id="login-form" autocomplete="on">
+          <label class="login-field">
+            <span class="login-label">成员名称</span>
+            <input id="login-name" type="text" autocomplete="username" placeholder="如 张三" aria-label="成员名称">
+          </label>
+          <label class="login-field">
+            <span class="login-label">口令</span>
+            <input id="login-pass" type="password" autocomplete="current-password" placeholder="请输入口令" aria-label="口令">
+          </label>
+          <!-- 【2026-10-27 多团队】团队码可选：不填就全局按名字找；重名时才需要填 -->
+          <label class="login-field">
+            <span class="login-label">团队码 <em class="login-opt">（可选）</em></span>
+            <input id="login-team" type="text" autocomplete="off" placeholder="如 WS-DEFAULT，名字重复时才需要" aria-label="团队码">
+          </label>
+          <p class="login-error" id="login-error" role="alert"></p>
+          <div class="login-actions">
+            <button type="button" class="ghost" id="login-cancel">取消</button>
+            <button type="submit" class="primary" id="login-submit">登录</button>
+          </div>
+          <p class="login-switch">
+            还没有账号？<button type="button" class="link" id="btn-goto-register">用团队邀请码加入</button>
+          </p>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- 【2026-10-27 多团队】自助加入团队（邀请码注册） -->
+  <div class="modal-overlay" id="register-modal" hidden>
+    <div class="modal login-card" role="dialog" aria-modal="true" aria-labelledby="register-title">
+      <div class="modal-head login-head">
+        <h2 id="register-title">加入团队</h2>
+        <button class="modal-close" id="register-close" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body login-body">
+        <p class="login-sub">向团队管理员要一个<span class="em">团队邀请码</span>，填进来就能创建自己的账号。<br>团队之间数据完全隔离——你看不到别的团队的日程。</p>
+        <form id="register-form" autocomplete="on">
+          <label class="login-field">
+            <span class="login-label">团队邀请码</span>
+            <input id="reg-code" type="text" autocomplete="off" placeholder="如 WS-8F3K2P" aria-label="团队邀请码">
+          </label>
+          <label class="login-field">
+            <span class="login-label">你的名字</span>
+            <input id="reg-name" type="text" autocomplete="username" maxlength="20" placeholder="团队内不能重名" aria-label="成员名称">
+          </label>
+          <label class="login-field">
+            <span class="login-label">设置口令</span>
+            <input id="reg-pass" type="password" autocomplete="new-password" placeholder="至少 6 位" aria-label="口令">
+          </label>
+          <label class="login-field">
+            <span class="login-label">确认口令</span>
+            <input id="reg-pass2" type="password" autocomplete="new-password" placeholder="再输一次" aria-label="确认口令">
+          </label>
+          <p class="login-error" id="register-error" role="alert"></p>
+          <div class="login-actions">
+            <button type="button" class="ghost" id="register-cancel">取消</button>
+            <button type="submit" class="primary" id="register-submit">加入</button>
+          </div>
+          <p class="login-switch">
+            已有账号？<button type="button" class="link" id="btn-goto-login">返回登录</button>
+          </p>
+        </form>
+      </div>
+    </div>
+  </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 删除确认弹窗（Day 11）：复用设置弹窗模板，主版 / PreText 版共用同一份 DOM -->
+  <div class="modal-overlay" id="delete-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="delete-title">
+      <div class="modal-head">
+        <h3 id="delete-title">删除确认</h3>
+        <button class="modal-close" id="delete-close" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body" id="delete-body">
+        <!-- 状态内容由 JS 注入：确认 / 处理中 / 成功 / 失败 -->
+      </div>
+    </div>
+  </div>
+
+  <!-- [Day 24] 时间拨轮：无依赖，须在 timeline.js 之前加载 -->
+  <script src="js/timepicker.js"></script>
+  <script src="js/login_phase2.js"></script>
+  <script src="js/export_phase2.js"></script>
+  <script src="js/timeline.js"></script>
+  <script src="js/router.js"></script>
+  <script src="js/animations.js"></script>
+</body>
+</html>

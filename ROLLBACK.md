@@ -8,20 +8,42 @@
 
 ## 0. 三十秒速查
 
+> **2026-10-28 起：回滚只需要记一条命令。**
+> ```bash
+> node resource/scripts/rollback.js --to=<版本名>
+> # 例：node resource/scripts/rollback.js --to=v1.0
+> # 不知道有哪些版本：直接跑 node resource/scripts/rollback.js
+> # 只想看会执行什么，不真上传：加 --dry-run
+> ```
+> 它会自动完成「选版本 → 装进固定目录 → 上传 → 轮询验证线上哈希真的变了 → 打耗时」，
+> 并**只动静态托管**（多团队版禁止回云函数，原因见 §10）。
+> 唯一的用户侧动作：先用 `node resource/scripts/rollback.js` 确认线上当前版本，回滚后人工核对 §10.5 那几项。
+
 | 你要做什么 | 用哪条 | 命令 |
 |---|---|---|
-| **前端回滚到上一版**（推荐） | CLI（P2） | `tcb hosting deploy <本地目录> workshop -e workshop-d4g02a7z81ff51a63 --verify` |
-| 没有 CLI 时 | 控制台（P1） | 静态网站托管 → 文件管理 → 上传 `resource/release/workshop` |
-| 云函数出问题 | P3（备查，未实操） | 见 §5 |
+| **前端回滚**（推荐） | 一键脚本 | `node resource/scripts/rollback.js --to=v1.0` |
+| 一键脚本跑不通（tcb 未登录 / TLS 掐断） | CLI 手工（P2） | `tcb hosting deploy resource/release/workshop workshop -e workshop-d4g02a7z81ff51a63 --verify` |
+| 连 CLI 都没有 | 控制台（P1） | 静态网站托管 → 文件管理 → 上传 `resource/release/workshop` |
+| 云函数出问题 | **多团队版禁止回函数** | 见 §10.3 的替代处置（不是 P3） |
 | 数据被误删 | P4（备查，未实操） | 见 §6 |
 | 拿不准要不要回滚 | 判断表 | 见 §7 |
 | **v1.1 阶段二回滚**（回滚顺序 / 数据要不要回 / 哪些 FAIL 属预期） | 增量说明 | 见 §9 |
+| **多团队（v1.2）回滚**（为什么只能回前端 / NULL 陷阱） | 增量说明 | 见 §10 |
 
-**先跑一条命令确认线上现在跑的是哪一版**：
+**先确认线上现在跑的是哪一版**（脚本会把 `resource/release/` 下所有包的哈希跟线上比对）：
 ```bash
-node resource/scripts/rollback-watch.js --once
-# 输出：线上 index.html MD5 + 判定（v1.0 / day22 / head / 未知版本）
+node resource/scripts/rollback.js
+# 输出：线上当前 v1.1-tenancy（60cc15ca…）+ 可用版本清单 + 哪个正跑在线上
 ```
+
+| 版本 | 线上 index.html（去 CR 后 MD5） | 回滚包 |
+|---|---|---|
+| `v1.0` | `645d88d8eb6fa38dc112fe3bc7f45438` | ✅ 已入库 |
+| `rollback-day22` | `eb736fffd5e7649e8b1921b028099265` | ✅ 已入库 |
+| `v1.1-tenancy`（当前线上：阶段二 + 多团队） | `60cc15ca782e3691ebc04afbbf473a00` | ✅ 已入库（2026-10-28 从 HEAD 打出） |
+
+> 打新包：`node resource/scripts/rollback.js --snapshot=<版本名>`，把当前 `source/` 前端固化成可回滚的版本。
+> **每次改动上线前都该先打一个包**，否则出问题时没有"回到刚才那版"的落点。
 
 ---
 
@@ -234,7 +256,10 @@ v1.1 新增的数据库变动是**向后兼容**的，不必跟着回退：
 
 只回前端不回函数，会出现"旧界面 + 新接口"——旧界面不调新端点，**能正常工作**；
 只回函数不回前端，会出现"新按钮打旧接口"——点「重置口令」会 404/400，**不坏数据但报错**。
-👉 所以真要回滚，**前端和函数一起回**，别只回一半。
+
+> ⚠️ **上面这条「前端和函数一起回」只适用于 v1.1（还没有多团队的时候）。**
+> **多团队上线后（2026-10-27 起）已作废**：那时回函数会让所有团队的日程互相可见。
+> 现在的规矩是 **只回前端、绝不回函数**，见 §10.1。
 
 ### 9.3 回滚后哪些验收会"预期内 FAIL"
 
@@ -255,12 +280,91 @@ v1.1 新增的数据库变动是**向后兼容**的，不必跟着回退：
 
 ---
 
-## 10. 相关文件
+## 10. 多团队（v1.2）回滚增量（2026-10-28）
+
+多团队隔离把「数据边界」写进了**云函数**，于是回滚这件事的性质变了：
+**回前端是安全的，回函数会直接造成跨团队数据互见。**
+
+### 10.1 一条铁律：只能回前端，不能回云函数
+
+| 回滚动作 | 数据隔离 | 结论 |
+|---|---|---|
+| **只回前端**（函数保持多团队版） | ✅ **仍在**。旧前端虽然不传 `teamId`，但服务端用令牌里的 `tid` 决定作用域（`resolveActor` / `resolveReadScope`） | ✅ **唯一允许的回滚方式** |
+| 前端 + 函数一起回 | ❌ 所有团队的日程合成一张表，互相可见 | ❌ 禁止 |
+| 只回函数（前端保持新版） | ❌ 同上，而且新版前端调 `team` / `register` 端点会落到旧函数的未知分支，界面同时报错 | ❌ 最糟 |
+
+**代码依据**（不是推测，`git show b8f5094^:source/cloud/items/db.js` 可复核）：
+
+| 旧版实现 | 多团队版 | 回滚后果 |
+|---|---|---|
+| `queryItems(q)` 只有 `buildQueryString(q)`，没有 team 条件 | `requireTeamId()` 缺参数直接抛错 | 旧函数**全表返回** → 跨团队互见 |
+| `findMemberByName` 末尾 `return rows.length ? rows[0] : null`（无排序） | 按 `(team_id, display_name)` 查 | 唯一索引已改成复合索引 → 两团队同名时登录会**串到别人团队的成员** |
+| 无 `teams_phase2` 表访问 | `findTeamByJoinCode` / `createTeam` | 团队码登录、邀请码注册全部失效 |
+
+### 10.2 为什么"只回前端"能成立（反直觉，但已验）
+
+- 旧前端的每个请求仍带 `X-Member-Token`，令牌里已有 `tid`；
+- 服务端 `resolveReadScope`：**登录 → 本团队；匿名 → 默认团队**，与前端版本无关；
+- 旧前端不调 `team` 端点 → 顶栏少一行团队名，其余功能完整；
+- 旧前端不传 `teamId` 给写接口 → 服务端本来就不接受前端传的 `teamId`（防伪造边界），无影响。
+
+👉 所以**旧前端 + 新函数 = 功能退一点、隔离不少**，这正是回滚想要的。
+
+### 10.3 函数真的出问题时怎么办（不是回退，是降级）
+
+按代价从低到高，**选一条执行，别直接回函数**：
+
+1. **先只回前端**：把用户能踩到的坑先关掉，给自己争取定位时间。
+2. **停写**：把非默认团队成员全部改 `readonly`（异常期间谁都不能改数据）：
+   ```sql
+   UPDATE members_phase2 SET role = 'readonly' WHERE team_id <> 1 AND role <> 'readonly';
+   ```
+   用完记得按原值改回（改之前先 `SELECT id, display_name, role, team_id` 存一份）。
+3. **摘团队**：确认第二个团队要暂停使用时，把他们的数据导出成 JSON 交给对方，再删掉该团队数据（`items` / `members_phase2` / `audit_phase2` / `teams_phase2` 按 `team_id`），此后只剩默认团队，回函数也不会串。
+4. **实在必须回函数**：先按第 3 条摘掉其他团队，回完立刻告知所有用户「暂时只支持单团队」。
+
+### 10.4 ⚠️ `team_id = NULL` 陷阱（回函数后才会踩到）
+
+`items.team_id` **没有 DEFAULT**（`db/schema_phase2.sql:161` 只为迁移期加了可空列）。
+所以只要函数被回退过，那段时间旧代码写入的行 `team_id` 是 `NULL`；再滚回多团队版时，
+查询条件是 `team_id = eq.N`，**NULL 永远不匹配 → 这批数据在界面上"消失"（但没丢）**。
+
+- 只回前端不会踩到（函数没动，仍写 `team_id`）。
+- 踩到后的补救（`1` 是默认团队 id，先用 `SELECT id, name FROM teams_phase2` 确认）：
+  ```sql
+  UPDATE items         SET team_id = 1 WHERE team_id IS NULL;
+  UPDATE members_phase2 SET team_id = 1 WHERE team_id IS NULL;
+  UPDATE audit_phase2  SET team_id = 1 WHERE team_id IS NULL;
+  ```
+
+### 10.5 回滚后必须人工核对（脚本代替不了）
+
+- [ ] 无痕窗口打开线上，登录一次：能看到日程、能新建、**能删除且要先点确认**
+- [ ] **只看到本团队的日程**。若出现别的团队的数据 → 立刻停手，说明函数被回滚了（§10.1）
+- [ ] 顶栏团队名：回 `v1.0` 会消失，属正常（那时还没有团队概念）
+- [ ] 底栏「在线：N」：回 `v1.1` 之前会消失，属正常
+- [ ] `node resource/scripts/verify-project.js`（打线上）—— 若大片红，说明**目标包本身有问题**，不是回滚没成功
+
+### 10.6 回滚包清单
+
+| 版本包 | 内容 | 用途 |
+|---|---|---|
+| `resource/release/v1.1-tenancy/` | `index.html` + `check.html` + `css/animations.css` + `css/base.css` + `js/`（6 个：animations / export_phase2 / login_phase2 / router / timeline / timepicker） | **当前线上的完整前端**，从 `HEAD` 打出（哈希 `60cc15ca…` 与线上逐字一致）。下次改动出问题时回到它 |
+| `resource/release/v1.0/` | 阶段一发布版 | 最保守的兜底 |
+| `resource/release/rollback-day22/` | Day 22 版本 | 历史演练留痕 |
+
+> 打包命令：`node resource/scripts/rollback.js --snapshot=<版本名>`（**不覆盖同名目录**，防止手滑毁掉旧包）。
+> 重新发布：`node resource/scripts/rollback.js --to=<版本名>`。
+
+---
+
+## 11. 相关文件
 
 | 文件 | 作用 |
 |---|---|
-| `resource/scripts/prepare-release.js` | 把目标版本装进固定目录 `workshop/` |
+| **`resource/scripts/rollback.js`** | **一条命令回滚/打快照**（2026-10-28）。自动扫描 `release/` 版本哈希、上传、轮询验证线上真的变了。只动静态托管 |
+| `resource/scripts/prepare-release.js` | 把目标版本装进固定目录 `workshop/`（rollback.js 内部会调它） |
 | `resource/scripts/rollback-watch.js` | 轮询判定线上版本 + 客观计时（`--once` 单次探测） |
-| `resource/scripts/verify-project.js` | 发布/回滚后 22 项全量检查 |
+| `resource/scripts/verify-project.js` | 发布/回滚后全量检查（V0–V10） |
 | `DEPLOY.md` | 首次部署的逐屏步骤（Day 15） |
 | `SECURITY_CHECKLIST.md` | 密钥与错误提示安全基线 |
