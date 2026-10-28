@@ -18,7 +18,7 @@
       <button id="btn-next-week">下周 ›</button>
       <button id="btn-new" class="primary">+ 新建</button>
       <button id="btn-settings" title="打开设置：自定义部门、标记、类型颜色、默认视图、导入导出">设置</button>
-      <button id="btn-import" title="导入日程（JSON）；图片/Excel 识别待第 3 周 OCR 接入">导入</button>
+      <button id="btn-import" title="导入日程：选择 JSON 文件（需先登录；重复项自动跳过，不会清空已有日程）">导入</button>
       <!-- [阶段二 P10] 顶栏「导出」下拉：CSV / JSON / 腾讯文档 -->
       <button id="btn-export" title="导出日程：CSV / JSON / 腾讯文档">导出 ▾</button>
       <div id="export-menu" class="export-menu" hidden>
@@ -219,7 +219,15 @@
               <button id="btn-import-data">导入日程</button>
               <input type="file" id="file-import-data" accept="application/json" hidden>
             </div>
-            <p class="set-hint">顶部「导入」按钮同样走 JSON；图片 / Excel 识别待第 3 周 OCR 接入。</p>
+            <p class="set-hint">
+              <strong>导入需要先登录</strong>（导入会写入当前团队的日程表）。<br>
+              文件格式：<code>{ "items": [ { "title": "部门周例会", "table": "work", "type": "meeting",
+              "startTime": "2026-10-28 10:00", "endTime": "2026-10-28 11:00", "ownerKey": "self" } ] }</code><br>
+              必填 <code>title</code> 与时间；<code>table</code> 取 <code>work</code>/<code>daily</code>；
+              缺 <code>endTime</code> 自动按开始时间 +30 分钟。<br>
+              <strong>导入是「合并」不是覆盖</strong>：只新增，不清空已有日程；已存在的（同标题同时段同归属）自动跳过。<br>
+              导出的 JSON 可直接再导入（同一团队内不会重复堆积）。图片 / Excel 识别尚未开通。
+            </p>
           </section>
         </div>
       </div>
@@ -244,7 +252,7 @@
       <div class="state-panel" data-state="empty" hidden>
         <div class="state-icon">🗓️</div>
         <p class="state-title">本周还没有安排</p>
-        <p class="state-text">点击「+ 新建」添加第一个事项；导入识别接入后可一键导入图片 / 表格。</p>
+        <p class="state-text">点击「+ 新建」添加第一个事项；也可以点顶部「导入」选 JSON 文件批量导入（需先登录）。</p>
         <button class="btn-primary" id="btn-empty-new">+ 新建事项</button>
       </div>
       <div class="state-panel" data-state="error" hidden>

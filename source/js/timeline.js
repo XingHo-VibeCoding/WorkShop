@@ -2172,19 +2172,158 @@ function exportData() {
     .then(r => { if (r.ok) showToast('已导出 ' + r.count + ' 条日程（JSON）'); })
     .catch(e => showToast('导出失败：' + e.message));
 }
-function importData(file) {
-  const r = new FileReader();
-  r.onload = ev => {
-    try {
-      const data = JSON.parse(ev.target.result);
-      if (!data.items || !Array.isArray(data.items)) throw new Error('缺少 items 数组');
-      items = data.items.map(it => ({ ...it, start: new Date(it.start) }));
-      currentOffset = 0;
-      afterMutation(true);
-      alert('日程已导入');
-    } catch (err) { alert('导入失败：' + err.message); }
+/* ---- 【2026-10-28 修复】日程导入：兼容导出格式 + 真正落库 + 合并 + 团队内判重 ----
+   修前三个问题（2026-10-28 查代码确认，此前的导入实质是「假装导入」）：
+     ① 只改内存 items，从不调接口 → 刷新即丢；更糟的是 15s 自动同步会拿云端态覆盖内存，
+        导入的内容会自己「消失」。
+     ② 字段名对不上：导出给的是 startTime="YYYY-MM-DD HH:mm"（全量串），
+        旧代码读 it.start（导出里根本没有这个字段）→ new Date(undefined) = Invalid Date，
+        且绕过了 apiItemToLocal 的拆分逻辑，条目一条都渲染不出来。
+     ③ items = data.items.map(...) 是整表替换，不是合并。
+   现在的行为：
+     · 兼容两种来源：本项目导出的 JSON（startTime 全量串）/ 早期手写格式（start + "HH:mm"）
+     · 逐条真正 POST 落库；同团队内重复由后端判重返回 409 → 计为「已存在·跳过」
+     · 合并，不清空本团队已有日程
+     · 未登录直接拦下（2026-10-27 起写操作必须登录），不白发请求 */
+const IMPORT_MAX = 500;   // 单次上限：太多会长时间占用页面，也掩盖单条错误
+const IMPORT_API_TYPES = ['meeting', 'course', 'travel', 'sport', 'life', 'pending'];
+
+// 开始时间缺结束时间时的兜底：+30 分钟（与拨轮选完自动 +30 的行为一致），跨天则截到 23:59
+function importPlus30(hhmm) {
+  const parts = String(hhmm).split(':').map(Number);
+  const total = parts[0] * 60 + parts[1] + 30;
+  if (total > 23 * 60 + 59) return '23:59';
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+// 把一条外部 JSON 规范成前端内部结构（start:Date + startTime/endTime:"HH:mm"）。
+// 无法规范时抛错，由调用方计入失败并给出具体原因（不静默丢弃）。
+function normalizeImportItem(raw) {
+  if (!raw || typeof raw !== 'object') throw new Error('条目不是对象');
+  const title = String(raw.title == null ? '' : raw.title).trim();
+  if (!title) throw new Error('缺少 title');
+
+  const startRaw = String(raw.startTime == null ? '' : raw.startTime).trim();
+  const endRaw = String(raw.endTime == null ? '' : raw.endTime).trim();
+  const isFullTime = s => /^\d{4}-\d{2}-\d{2}[ T]\d{1,2}:\d{2}/.test(s);
+  const isHhmm = s => /^\d{1,2}:\d{2}$/.test(s);
+
+  let dateStr = '';
+  let st = '';
+  let et = '';
+
+  if (isFullTime(startRaw)) {
+    // A. 本项目导出格式：startTime / endTime 都是全量串
+    dateStr = startRaw.slice(0, 10);
+    st = startRaw.slice(11, 16).padStart(5, '0');
+    if (isFullTime(endRaw)) et = endRaw.slice(11, 16);
+    else if (isHhmm(endRaw)) et = endRaw.padStart(5, '0');
+  } else {
+    // B. 早期手写格式：start 给日期，startTime 给 HH:mm
+    const base = raw.start != null ? new Date(raw.start) : null;
+    if (!base || isNaN(base.getTime())) {
+      throw new Error('时间无法解析（既没有 startTime 全量串，也没有合法的 start）');
+    }
+    const p = n => String(n).padStart(2, '0');
+    dateStr = `${base.getFullYear()}-${p(base.getMonth() + 1)}-${p(base.getDate())}`;
+    st = isHhmm(startRaw) ? startRaw.padStart(5, '0') : `${p(base.getHours())}:${p(base.getMinutes())}`;
+    if (isHhmm(endRaw)) et = endRaw.padStart(5, '0');
+  }
+
+  if (!isHhmm(st)) throw new Error('缺少开始时间');
+  if (!isHhmm(et)) et = importPlus30(st);                 // 结束时间缺失 → 兜底 +30 分钟
+  if (et <= st) throw new Error(`结束时间须晚于开始时间（${st} → ${et}）`);
+
+  let type = String(raw.type == null ? '' : raw.type).trim();
+  if (type === 'class' || type === 'trip') type = localTypeToApi(type);   // 前端词 → 库存词
+  if (IMPORT_API_TYPES.indexOf(type) < 0) type = 'pending';               // 未知类型兜底为「待安排」
+
+  const ownerKeyRaw = String(raw.ownerKey == null ? '' : raw.ownerKey).trim();
+  const ownerKey = OWNERS.some(o => o.key === ownerKeyRaw) ? ownerKeyRaw : 'self';
+
+  return {
+    title,
+    table: (raw.table === 'daily' || raw.table === 'work') ? raw.table : 'work',
+    type,
+    start: new Date(`${dateStr}T00:00:00`),
+    startTime: st,
+    endTime: et,
+    attendees: raw.attendees == null ? '' : String(raw.attendees),
+    venue: raw.venue == null ? '' : String(raw.venue),
+    note: raw.note == null ? '' : String(raw.note),
+    ownerKey,
   };
-  r.readAsText(file);
+}
+
+function readFileAsText(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = ev => resolve(String(ev.target.result || ''));
+    r.onerror = () => reject(new Error('读取文件失败（文件可能已被移动或没有读取权限）'));
+    r.readAsText(file);
+  });
+}
+
+async function importData(file) {
+  try {
+    // 门 1：写操作必须登录（匿名 2026-10-27 起只读，否则每条都会 401）
+    const member = (window.Auth && typeof window.Auth.currentMember === 'function') ? window.Auth.currentMember() : null;
+    if (!member) {
+      alert('导入日程需要先登录。\n\n导入会写入当前团队的日程表，未登录只能看不能写。\n请先点右上角登录，再回来导入。');
+      return;
+    }
+
+    // 门 2：文件与格式
+    const text = await readFileAsText(file);
+    let data = null;
+    try { data = JSON.parse(text); }
+    catch (e) {
+      alert('导入失败：文件不是合法的 JSON。\n\n· 日程请导入 .json 文件（或把 Excel/CSV 先另存为 JSON）\n· 图片 / 表格识别尚未开通');
+      return;
+    }
+    const list = Array.isArray(data) ? data : (data && data.items);
+    if (!Array.isArray(list)) {
+      alert('导入失败：文件里缺少 items 数组。\n\n正确格式示例：\n{\n  "items": [\n    { "title": "部门周例会", "table": "work", "type": "meeting",\n      "startTime": "2026-10-28 10:00", "endTime": "2026-10-28 11:00",\n      "ownerKey": "self" }\n  ]\n}');
+      return;
+    }
+    if (!list.length) { alert('这个文件的 items 是空数组，没有可导入的日程。'); return; }
+    if (list.length > IMPORT_MAX) {
+      alert(`一次最多导入 ${IMPORT_MAX} 条，这个文件有 ${list.length} 条。\n请拆分文件后分批导入。`);
+      return;
+    }
+
+    // 门 3：逐条落库。单条失败不影响其余（失败原因逐条汇总给用户，不静默吞）
+    let okCount = 0;
+    let dupCount = 0;
+    const fails = [];
+    for (let i = 0; i < list.length; i++) {
+      let local = null;
+      try { local = normalizeImportItem(list[i]); }
+      catch (e) { fails.push(`第 ${i + 1} 条：${e.message}`); continue; }
+      try {
+        await apiMutate('POST', `${API_BASE}/api/items`, localItemToPayload(local));
+        okCount++;
+      } catch (e) {
+        // 后端按 title+table+type+start+end+ownerKey 在【本团队内】判重 → 409
+        if (e.code === 409) dupCount++;
+        else fails.push(`第 ${i + 1} 条「${local.title}」：${e.message}`);
+      }
+      if ((i + 1) % 10 === 0 && i + 1 < list.length) showToast(`正在导入 ${i + 1}/${list.length}…`);
+    }
+
+    // 落库成功后重拉本团队数据（合并语义：只新增，不删已有）
+    try { items = await loadItems(currentOffset); afterMutation(true); }
+    catch (e) { /* 已落库，只是重拉失败：不误导成"导入失败" */ }
+
+    const lines = [`导入完成：新增 ${okCount} 条`];
+    if (dupCount) lines.push(`已存在跳过 ${dupCount} 条`);
+    if (fails.length) lines.push(`失败 ${fails.length} 条`);
+    let msg = lines.join('，') + '。';
+    if (fails.length) msg += '\n\n失败明细（最多显示 5 条）：\n' + fails.slice(0, 5).join('\n');
+    alert(msg);
+  } catch (err) {
+    alert('导入失败：' + (err && err.message ? err.message : String(err)));
+  }
 }
 
 // ---- 设置相关事件绑定（Day 9 实装）----
