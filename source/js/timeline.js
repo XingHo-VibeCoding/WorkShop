@@ -135,6 +135,9 @@ function applyRoleUI() {
   const me = (window.Auth && typeof window.Auth.currentMember === 'function') ? window.Auth.currentMember() : null;
   const btnNew = document.getElementById('btn-new');
   if (btnNew) btnNew.hidden = ro;
+  // [2026-10-28] 只读身份：批量删除入口一并隐藏（后端仍会 403，这里只是别让人白点）
+  const btnBatch = document.getElementById('btn-batch');
+  if (btnBatch) btnBatch.hidden = ro;
   // 【阶段二 权限收敛 seam B】只读身份：禁用「保存我的会议信息」（后端 updateProfile 同步 403 兜底，见 profile_phase2）
   const btnSaveMeeting = document.getElementById('btn-save-meeting');
   if (btnSaveMeeting) btnSaveMeeting.disabled = ro;
@@ -364,11 +367,25 @@ function renderItemCard(item, opts = {}) {
   el.tabIndex = 0; // 可聚焦：键盘 Tab 到卡片即显示备注浮窗（聚焦即生效）
   // 排版：标记+标题 同行 → 时间 一行（备注移入 hover/focus 浮窗，不再挤占最矮卡片高度）
   el.innerHTML =
+    (selectMode ? `<span class="item-check" aria-hidden="true">${selectedIds.has(item.id) ? '✓' : ''}</span>` : '') +
     (showMark ? `<span class="item-mark" title="${esc(m.name)}">${esc(m.symbol)}</span>` : '') +
     `<span class="item-title">${esc(renderItemText(item))}</span>` +
     `<span class="item-time">${item.startTime}–${item.endTime}</span>` +
     (warn ? `<span class="item-warn" title="${esc(warn.title)}">⚠</span>` : '') + meetEntryHtml(item);
-  el.addEventListener('click', onClick || (() => showDetail(item)));
+  // [2026-10-28] 批量模式：点卡片＝勾选（不进详情、不弹重叠窗），可键盘 Space 切换
+  el.addEventListener('click', (ev) => {
+    if (selectMode) { ev.stopPropagation(); toggleSelect(item.id); return; }
+    (onClick || (() => showDetail(item)))();
+  });
+  if (selectMode) {
+    el.classList.add('is-selectable');
+    if (selectedIds.has(item.id)) el.classList.add('is-selected');
+    el.setAttribute('role', 'checkbox');
+    el.setAttribute('aria-checked', selectedIds.has(item.id) ? 'true' : 'false');
+    el.addEventListener('keydown', (ev) => {
+      if (ev.key === ' ' || ev.key === 'Enter') { ev.preventDefault(); toggleSelect(item.id); }
+    });
+  }
   // 备注浮窗：桌面端 hover/聚焦即显示完整备注；移动端触摸无 hover，改为「点卡片→底部抽屉看备注」，故内部判 isMobile 屏蔽浮窗
   el.addEventListener('mouseenter', () => { if (!isMobile()) showNote(item, el); });
   el.addEventListener('mouseleave', () => { if (!isMobile()) scheduleNoteHide(); });
@@ -1284,6 +1301,322 @@ async function saveItem(existing) {
 // ---- 删除确认弹窗（Day 11）：页面内状态机，替代原生 confirm() ----
 /* 状态机：confirm(确认弹窗) → loading(处理中) → success(移除+刷新) / fail(红字+重试)
    最明确的“生效”反馈 = 点击删除后按钮立即进入 loading 禁用态(spinner) + 成功后卡片可见消失。 */
+/* ============ 【2026-10-28】批量选择 + 批量删除 + 限时撤销 ============
+   为什么要撤销：删除是不可恢复的（后端闸门 A 要求 confirm=true 才删），误删一条要重新录入
+   全部字段。这里给一个 8 秒窗口，删错了能立刻拉回来。
+
+   ⚠️ 撤销的真相（必须如实理解）：
+     恢复靠「按快照重新创建」，所以恢复出来的是**新 id、新更新时间**，不是同一个数据库行。
+     业务字段（类型/标题/时间/地点/备注/归属人/会议号）原样还原；create 端点支持
+     ownerMemberId=代他人放置，所以连「这条是别人的」也保得住。
+     但这条记录的历史（谁在什么时候改过）不随撤销回来——审计流水不会重写。
+
+   为什么用「批量模式」而不是常驻勾选框：
+     卡片最矮只有 20px，常驻勾选框会挤压标题；而且没有选择意图时点卡片应当直接看详情
+     （主路径），不能被勾选打断。所以点「批量」才进入，退出即清空。
+   ========================================================================== */
+const SELECT_LIMIT = 200;        // 单次最多选多少条：防一次误选整月、也防请求打爆
+const UNDO_MS = 8000;            // 撤销窗口：够看清"删错了"，又不至于久到忘记
+const BATCH_CONCURRENCY = 4;     // 并发上限：一次最多 4 个删除请求在飞
+
+let selectMode = false;
+const selectedIds = new Set();
+let undoState = null;            // { snapshots:[…], timer, count }
+let isUndoing = false;
+
+// 可写身份：已登录且不是只读（后端仍是最终审防线，这里只是不发无效请求）
+function canWrite() {
+  const m = window.Auth && typeof window.Auth.currentMember === 'function' ? window.Auth.currentMember() : null;
+  return !!m && m.role !== 'readonly';
+}
+
+function enterSelectMode() {
+  if (!canWrite()) { showToast('需要登录且非只读身份才能批量删除'); return; }
+  selectMode = true;
+  selectedIds.clear();
+  if (typeof closeDetailDrawer === 'function') closeDetailDrawer();
+  render();
+  renderSelectBar();
+}
+
+function exitSelectMode() {
+  if (!selectMode) return;
+  selectMode = false;
+  selectedIds.clear();
+  document.body.classList.remove('is-selecting');
+  render();
+  renderSelectBar();
+  // 批量期间自动同步是挂起的，退出时补一次（否则别人这几分钟的改动要等下一个 15s）
+  if (typeof flushPendingSync === 'function') flushPendingSync();
+}
+
+function toggleSelect(id) {
+  if (selectedIds.has(id)) selectedIds.delete(id);
+  else {
+    if (selectedIds.size >= SELECT_LIMIT) { showToast(`单次最多选 ${SELECT_LIMIT} 条`); return; }
+    selectedIds.add(id);
+  }
+  const el = document.querySelector(`.item[data-id="${id}"]`);
+  if (el) el.classList.toggle('is-selected', selectedIds.has(id));
+  renderSelectBar();
+}
+
+// 全选「当前筛选下真正看得见的」——不选被筛掉的内容，避免"以为只删这几条，实际删了一批"
+function selectAllVisible() {
+  const visible = applyFilter(items);
+  const before = selectedIds.size;
+  for (const it of visible) {
+    if (selectedIds.size >= SELECT_LIMIT) break;
+    selectedIds.add(it.id);
+  }
+  render();
+  renderSelectBar();
+  if (selectedIds.size === before) showToast('当前筛选下没有可新增的选中项');
+}
+
+function clearSelect() {
+  selectedIds.clear();
+  render();
+  renderSelectBar();
+}
+
+function renderSelectBar() {
+  const bar = document.getElementById('batch-bar');
+  const cnt = document.getElementById('batch-count');
+  const btnBatch = document.getElementById('btn-batch');
+  if (btnBatch) btnBatch.classList.toggle('is-active', selectMode);
+  if (!bar) return;
+  bar.hidden = !selectMode;
+  document.body.classList.toggle('is-selecting', selectMode);
+  if (!selectMode) return;
+  if (cnt) cnt.textContent = `已选 ${selectedIds.size} 条`;
+  const del = document.getElementById('btn-batch-delete');
+  if (del) del.disabled = selectedIds.size === 0;
+}
+
+// 删前快照：只留重建必需的业务字段（不留 id——恢复一定是新行）
+function snapshotOf(it) {
+  return {
+    table: it.table,
+    type: it.type,
+    title: it.title,
+    dateStr: `${it.start.getFullYear()}-${String(it.start.getMonth() + 1).padStart(2, '0')}-${String(it.start.getDate()).padStart(2, '0')}`,
+    startTime: it.startTime,
+    endTime: it.endTime,
+    attendees: it.attendees || '',
+    venue: it.venue || '',
+    note: it.note || '',
+    ownerKey: it.ownerKey,
+    ownerMemberId: it.ownerMemberId != null ? Number(it.ownerMemberId) : null,
+    borderColor: it.borderColor || '',
+    meetingNo: it.meetingNo || null,
+    meetingUrl: it.meetingUrl || null,
+  };
+}
+
+function openBatchDeleteModal() {
+  const list = items.filter(x => selectedIds.has(x.id));
+  if (!list.length) { showToast('还没有选中任何日程'); return; }
+  const overlay = document.getElementById('delete-modal');
+  const body = document.getElementById('delete-body');
+  if (!overlay || !body) return;
+  _delUserCloseLocked = false;
+
+  const cloud = list.filter(x => isCloudId(x.id));
+  const local = list.filter(x => !isCloudId(x.id));
+  const secs = Math.round(UNDO_MS / 1000);
+  const preview = list.slice(0, 3).map(x => `「${esc(x.title)}」`).join('、') + (list.length > 3 ? ` 等 ${list.length} 条` : '');
+
+  body.innerHTML =
+    `<p class="del-msg">确定要删除选中的 <b>${list.length}</b> 条日程吗？</p>` +
+    `<p class="del-sub">${preview}</p>` +
+    `<p class="del-sub">其中 ${cloud.length} 条会从云端删除${local.length ? `；${local.length} 条只在本页移除（本来就没落库）` : ''}。</p>` +
+    `<p class="del-sub">删除后 ${secs} 秒内可以点「撤销」恢复（恢复为新的记录编号，内容与归属人不变）。</p>` +
+    `<div class="del-actions">` +
+      `<button id="del-cancel">取消</button>` +
+      `<button class="btn-danger" id="del-confirm">删除 ${list.length} 条</button>` +
+    `</div>`;
+
+  overlay.classList.remove('modal--pretext');
+  overlay.hidden = false;
+  overlay.classList.remove('is-open');
+  void overlay.offsetWidth;
+  overlay.classList.add('is-open');
+  document.getElementById('del-cancel').focus();
+  document.getElementById('del-cancel').onclick = () => closeDeleteModal();
+  document.getElementById('delete-close').onclick = () => closeDeleteModal();
+  overlay.onclick = (e) => { if (e.target === overlay) closeDeleteModal(); };
+  document.getElementById('del-confirm').onclick = () => runBatchDelete(list);
+  overlay._keyHandler = (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); closeDeleteModal(); }
+    else if (e.key === 'Enter') {
+      e.preventDefault();
+      const c = overlay.querySelector('#del-confirm');
+      if (c && !c.disabled) c.click();
+    }
+  };
+  overlay.addEventListener('keydown', overlay._keyHandler);
+}
+
+async function runBatchDelete(list) {
+  const overlay = document.getElementById('delete-modal');
+  const body = document.getElementById('delete-body');
+  if (!body) return;
+  _delUserCloseLocked = true;
+  body.innerHTML = `<p class="del-loading"><span class="spinner"></span>正在删除 ${list.length} 条…</p>`;
+
+  const cloud = list.filter(x => isCloudId(x.id));
+  const local = list.filter(x => !isCloudId(x.id));
+  const removed = [];   // 成功移除的（云端 + 本页）
+  const restorable = []; // 其中可撤销的（只有云端项能重建）
+  const fails = [];
+
+  // 本页项：直接内存移除，无需请求
+  local.forEach(it => { removed.push(it.id); deletedIds.add(it.id); });
+
+  // 云端项：并发池，最多 BATCH_CONCURRENCY 条在飞
+  let cursor = 0;
+  async function worker() {
+    while (cursor < cloud.length) {
+      const it = cloud[cursor++];
+      try {
+        await apiMutate('DELETE', `${API_BASE}/api/items?id=${it.id}&confirm=true`);
+        restorable.push(snapshotOf(it));
+        removed.push(it.id);
+        deletedIds.add(it.id);
+      } catch (e) {
+        if (e.code === 404) {
+          // 云端已经没有了（可能别处删过）：当作已删，但**不进撤销栈**——没东西可重建
+          removed.push(it.id);
+          deletedIds.add(it.id);
+        } else {
+          fails.push(`${it.title}：${e.message}`);
+        }
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(BATCH_CONCURRENCY, cloud.length) }, worker));
+
+  // 内存同步：成功的移除；失败的原样留着（并如实报出来）
+  items = items.filter(x => !removed.includes(x.id));
+  selectedIds.clear();
+  _delUserCloseLocked = false;
+  closeDeleteModal();
+  afterMutation(true);
+  renderSelectBar();
+
+  if (restorable.length) pushUndo(restorable);
+  if (fails.length) {
+    showToast(`已删除 ${removed.length} 条，${fails.length} 条失败：${fails[0]}`);
+  } else if (removed.length) {
+    showToast(`已删除 ${removed.length} 条`);
+  }
+  // 全部失败：别静默（否则用户以为删了）
+  if (!removed.length && fails.length) {
+    openBatchDeleteModalFail(fails);
+  }
+}
+
+// 全失败：给一个能看清原因的弹窗（批量场景下 toast 只会闪过第一条）
+function openBatchDeleteModalFail(fails) {
+  const body = document.getElementById('delete-body');
+  const overlay = document.getElementById('delete-modal');
+  if (!body || !overlay) return;
+  body.innerHTML =
+    `<p class="del-error del-error-shake">一条都没删掉</p>` +
+    `<p class="del-sub">${fails.slice(0, 5).map(f => esc(f)).join('；')}${fails.length > 5 ? ` …共 ${fails.length} 条` : ''}</p>` +
+    `<div class="del-actions"><button id="del-cancel">知道了</button></div>`;
+  overlay.hidden = false;
+  overlay.classList.add('is-open');
+  document.getElementById('del-cancel').onclick = () => closeDeleteModal();
+}
+
+/* ---- 限时撤销 ---- */
+function pushUndo(snapshots) {
+  clearUndo();
+  undoState = { snapshots, timer: null, count: snapshots.length };
+  const bar = document.getElementById('undo-bar');
+  const txt = document.getElementById('undo-text');
+  if (txt) txt.textContent = `已删除 ${snapshots.length} 条日程`;
+  if (bar) {
+    bar.hidden = false;
+    bar.classList.remove('show');
+    void bar.offsetWidth;
+    bar.classList.add('show');
+  }
+  undoState.timer = setTimeout(() => {
+    clearUndo();
+    showToast('撤销窗口已过，日程已永久删除');
+  }, UNDO_MS);
+}
+
+function clearUndo() {
+  if (undoState && undoState.timer) clearTimeout(undoState.timer);
+  undoState = null;
+  const bar = document.getElementById('undo-bar');
+  if (bar) { bar.classList.remove('show'); bar.hidden = true; }
+}
+
+async function doUndo() {
+  if (!undoState || isUndoing) return;
+  const snaps = undoState.snapshots;
+  isUndoing = true;
+  if (undoState.timer) clearTimeout(undoState.timer);
+  const bar = document.getElementById('undo-bar');
+  const txt = document.getElementById('undo-text');
+  if (txt) txt.textContent = `正在恢复 ${snaps.length} 条…`;
+  const btn = document.getElementById('btn-undo');
+  if (btn) btn.disabled = true;
+
+  let ok = 0;
+  const errs = [];
+  let cursor = 0;
+  async function worker() {
+    while (cursor < snaps.length) {
+      const s = snaps[cursor++];
+      const payload = {
+        table: s.table,
+        type: localTypeToApi(s.type),
+        title: s.title,
+        startTime: `${s.dateStr} ${s.startTime}`,
+        endTime: `${s.dateStr} ${s.endTime}`,
+        attendees: s.attendees,
+        venue: s.venue,
+        note: s.note,
+        ownerKey: s.ownerKey,
+        borderColor: s.borderColor || undefined,
+        // 归属人原样带回：create 端点支持 ownerMemberId → 代他人放置（ACL 放行、留痕 place_for）
+        ownerMemberId: s.ownerMemberId != null ? s.ownerMemberId : undefined,
+        meetingNo: s.meetingNo || undefined,
+        meetingUrl: s.meetingUrl || undefined,
+      };
+      try {
+        await apiMutate('POST', `${API_BASE}/api/items`, payload);
+        ok++;
+      } catch (e) {
+        errs.push(`${s.title}：${e.message}`);
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(BATCH_CONCURRENCY, snaps.length) }, worker));
+
+  isUndoing = false;
+  if (btn) btn.disabled = false;
+  clearUndo();
+  try {
+    items = await loadItems(currentOffset);
+    if (window.setState) setState('ready');
+  } catch (e) {
+    afterMutation(false);
+  }
+  if (errs.length) {
+    showToast(`已恢复 ${ok} 条，${errs.length} 条失败：${errs[0]}`);
+  } else {
+    showToast(`已恢复 ${ok} 条（新编号，内容与归属人不变）`);
+  }
+  if (bar) bar.hidden = true;
+}
+
 function deleteItem(id) {
   const it = items.find(x => x.id === id);
   if (!it) return;
@@ -1511,6 +1844,23 @@ document.getElementById('btn-new').addEventListener('click', () => {
 });
 // 空状态「新建」
 document.getElementById('btn-empty-new').addEventListener('click', () => { setState('success'); renderForm(null); });
+
+// [2026-10-28] 批量管理：进入/退出 + 全选/清空 + 删除 + 撤销
+document.getElementById('btn-batch').addEventListener('click', () => {
+  if (selectMode) exitSelectMode(); else enterSelectMode();
+});
+document.getElementById('btn-batch-all').addEventListener('click', () => selectAllVisible());
+document.getElementById('btn-batch-none').addEventListener('click', () => clearSelect());
+document.getElementById('btn-batch-delete').addEventListener('click', () => openBatchDeleteModal());
+document.getElementById('btn-batch-exit').addEventListener('click', () => exitSelectMode());
+document.getElementById('btn-undo').addEventListener('click', () => doUndo());
+document.getElementById('btn-undo-close').addEventListener('click', () => clearUndo());
+// Esc 退出批量模式（未删任何东西，纯退出，不需要确认）
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && selectMode && !document.querySelector('.modal-overlay:not([hidden])')) {
+    exitSelectMode();
+  }
+});
 // 错误状态「重试」
 document.getElementById('btn-retry').addEventListener('click', () => bootstrap());
 // [Day 27] 顶栏「↻ 刷新」手动兜底：bootstrap() 内部已兜住异常并切到 error 态，不会抛出，
@@ -1946,6 +2296,11 @@ async function syncTick(opts) {
   if (_syncing) return;                        // 弱网时防堆积：上一轮没回来就不发新的
   if (document.hidden) return;                 // ② 页面不可见 → 暂停
   if (isFormOpen() && !force) { _syncPending = true; return; }  // ① 填表中 → 挂起，等关闭后补
+  // ③ [2026-10-28] 撤销恢复中 → 挂起：恢复是逐条 POST，中途拉列表会把"还没恢复完"的中间态当基线，
+  //    导致签名跳变、重绘两遍（被删项闪一下又回来）。撤销结束后 doUndo 会自己重新 loadItems。
+  if (isUndoing && !force) { _syncPending = true; return; }
+  // ④ [2026-10-28] 批量选择中 → 挂起：重绘会重建卡片、清掉勾选态，中途被同步打断很难受
+  if (selectMode && !force) { _syncPending = true; return; }
 
   _syncing = true;
   try {

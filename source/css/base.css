@@ -246,8 +246,67 @@ body { display: flex; flex-direction: column; height: 100vh; }
   font-size: 12px; color: var(--ink-soft);
 }
 
-/* ===== 四状态层（加载 / 空 / 错误）===== */
-.state-layer {
+/* ===== [2026-10-28] 批量选择 + 限时撤销 =====
+   两条 bar 都固定贴在视口底部、压在状态栏上方：批量操作是"临时态"，不该挤占文档流；
+   用 fixed 才能保证滚动到任意位置都够得着（时间线很长时尤其重要）。 */
+.batch-bar, .undo-bar {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 14px; border-radius: 999px;
+  background: var(--panel); border: 1px solid var(--line);
+  box-shadow: 0 6px 24px rgba(16, 24, 40, .16);
+  z-index: 60; font-size: 13px;
+}
+.batch-bar { bottom: 46px; }
+.undo-bar { bottom: 46px; }
+
+.batch-count { font-weight: 600; color: var(--ink); }
+.batch-bar button, .undo-bar button {
+  font-size: 12px; padding: 5px 10px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer;
+}
+.batch-bar button:hover:not(:disabled), .undo-bar button:hover:not(:disabled) { background: var(--accent-soft); }
+.batch-bar button:disabled { opacity: .45; cursor: not-allowed; }
+.batch-bar .btn-danger { border-color: #f0b4ad; color: #b3261e; }
+.batch-bar .btn-danger:hover:not(:disabled) { background: #fdeceb; }
+
+/* 顶栏「批量」按钮的激活态 */
+#btn-batch.is-active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+/* 撤销条：入场动画由 .show 控制（hidden 属性负责真正隐藏） */
+.undo-bar { opacity: 0; transform: translateX(-50%) translateY(8px); transition: opacity .18s, transform .18s; }
+.undo-bar.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.undo-bar .undo-text { color: var(--ink); }
+.undo-bar .undo-do {
+  border-color: var(--accent); color: var(--accent); font-weight: 600;
+}
+.undo-bar .undo-close { border: none; font-size: 15px; line-height: 1; padding: 4px 6px; color: var(--ink-soft); }
+
+/* ---- 卡片勾选态：勾选圈绝对定位在左上，不挤压标题行 ---- */
+.item.is-selectable { cursor: pointer; }
+.item.is-selectable:hover { filter: brightness(1.06); }
+.item.is-selected { outline: 3px solid #fff; outline-offset: -3px; box-shadow: 0 0 0 3px var(--accent); }
+.item-check {
+  position: absolute; left: 2px; top: 2px; width: 12px; height: 12px;
+  border-radius: 50%; background: rgba(255, 255, 255, .85);
+  border: 1.5px solid rgba(255, 255, 255, .95);
+  color: var(--accent); font-size: 9px; line-height: 12px; text-align: center;
+  font-weight: 700; pointer-events: none;
+}
+.item.is-selected .item-check { background: #fff; }
+/* 勾选圈占位后标题右移一点，避免压字 */
+.item.is-selectable .item-title { padding-left: 14px; }
+body.is-selecting .item { user-select: none; }
+
+@media (max-width: 768px) {
+  .batch-bar, .undo-bar { left: 12px; right: 12px; transform: none; flex-wrap: wrap; justify-content: center; }
+  .undo-bar { transform: translateY(8px); }
+  .undo-bar.show { transform: translateY(0); }
+  .batch-bar { bottom: 8px; }
+  .undo-bar { bottom: 8px; }
+}
+
+/* ===== 四状态层（加载 / 空 / 错误）===== */.state-layer {
   position: absolute; inset: 0; background: var(--bg);
   display: flex; align-items: center; justify-content: center; z-index: 5;
 }

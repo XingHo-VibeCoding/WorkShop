@@ -17,6 +17,8 @@
       <button id="btn-prev-week">‹ 上周</button>
       <button id="btn-next-week">下周 ›</button>
       <button id="btn-new" class="primary">+ 新建</button>
+      <!-- [2026-10-28] 批量管理：进入后点卡片=勾选，可一次删除多条（8 秒内可撤销） -->
+      <button id="btn-batch" title="批量管理：点卡片勾选，可一次删除多条（删除后 8 秒内可撤销）">批量</button>
       <button id="btn-settings" title="打开设置：自定义部门、标记、类型颜色、默认视图、导入导出">设置</button>
       <button id="btn-import" title="导入日程：选择 JSON 文件（需先登录；重复项自动跳过，不会清空已有日程）">导入</button>
       <!-- [阶段二 P10] 顶栏「导出」下拉：CSV / JSON / 腾讯文档 -->
@@ -293,6 +295,22 @@
     <span id="stat-online" title="在线人数：登录成员 30 秒上报一次心跳，2 分钟窗口内有心跳计为在线">在线：—</span>
     <span id="stat-sync">同步状态：本地内存（未接入腾讯文档）</span>
   </footer>
+
+  <!-- [2026-10-28] 批量选择操作条：只在批量模式下出现，压在状态栏上方 -->
+  <div class="batch-bar" id="batch-bar" hidden role="toolbar" aria-label="批量操作">
+    <span class="batch-count" id="batch-count">已选 0 条</span>
+    <button id="btn-batch-all">全选当前筛选</button>
+    <button id="btn-batch-none">清空选择</button>
+    <button class="btn-danger" id="btn-batch-delete">删除所选</button>
+    <button id="btn-batch-exit">退出批量</button>
+  </div>
+
+  <!-- [2026-10-28] 限时撤销条：删除成功后浮出，8 秒内可点撤销 -->
+  <div class="undo-bar" id="undo-bar" hidden role="status" aria-live="polite">
+    <span class="undo-text" id="undo-text">已删除</span>
+    <button class="undo-do" id="btn-undo">撤销</button>
+    <button class="undo-close" id="btn-undo-close" title="关掉这条提示（日程不会恢复）" aria-label="关闭">×</button>
+  </div>
 
   <!-- 阶段二 P8：成员登录弹窗 -->
   <div class="modal-overlay" id="login-modal" hidden>
